@@ -1,11 +1,6 @@
-"""Runtime additions for Jarvis interruption and orb presentation.
-
-Kept separate from the existing window implementation so the core UI stays
-stable while we iterate on hands-free controls.
-"""
+"""Runtime additions for Jarvis interruption and orb presentation."""
 
 import math
-import time
 
 from PyQt6.QtCore import Qt, QTimer, QPointF
 from PyQt6.QtGui import QColor, QPainter, QPen, QRadialGradient, QFont
@@ -34,8 +29,6 @@ def _larger_orb_paint(self, event):
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
     center = QPointF(self.width() / 2, self.height() / 2)
-
-    # The old orb was 32 px radius. The main interface now uses ~50 px.
     base_radius = 50
 
     if self.state == "listening":
@@ -127,26 +120,20 @@ JarvisOrb.paintEvent = _larger_orb_paint
 
 
 # ============================================================
-# "JARVIS STOP"
+# WINDOW PATCHES
 # ============================================================
 
 _original_window_init = JarvisWindow.__init__
 _original_start_worker = JarvisWindow.start_worker
 _original_handle_error = JarvisWindow.handle_error
+_original_tts_response_finished = JarvisWindow.tts_response_finished
+_original_show_orb_mode = JarvisWindow.show_orb_mode
 
 
 def _patched_window_init(self):
     _original_window_init(self)
-
     self.stop_worker = None
     self.response_cancelled = False
-
-    self.tts.speech_interrupted.connect(
-        self._handle_speech_interrupted
-    )
-
-    # The larger orb must also fit inside the floating orb-only window.
-    self._original_orb_maximum_size = self.maximumSize()
 
 
 def _start_stop_listener(self):
@@ -196,8 +183,6 @@ def _handle_stop_command(self):
     self.response_cancelled = True
 
     self._stop_stop_listener()
-
-    # This now stops both pending TTS and the currently-running SAPI5 engine.
     self.tts.stop_speaking()
 
     self.orb.set_speaking_level(0.0)
@@ -215,14 +200,35 @@ def _handle_stop_command(self):
         self.interpreted_label.hide()
         self.response_label.hide()
         self.input.hide()
-
-        # Return to passive wake listening after interruption.
         QTimer.singleShot(400, self.start_wake_listener)
 
 
-def _handle_speech_interrupted(self):
-    self.orb.set_speaking_level(0.0)
-    self.orb.set_state("idle")
+def _patched_tts_response_finished(self):
+    # Stop command listening before the original handler can restart
+    # passive wake listening in orb mode.
+    self._stop_stop_listener()
+    _original_tts_response_finished(self)
+
+
+def _patched_show_orb_mode(self):
+    _original_show_orb_mode(self)
+
+    # The orb is now 210x210 instead of the old 150x150.
+    self.setMaximumSize(230, 230)
+    self.resize(230, 230)
+
+    screen = self.screen()
+    if screen is None:
+        from PyQt6.QtWidgets import QApplication
+        screen = QApplication.primaryScreen()
+
+    geometry = screen.availableGeometry()
+    margin = 8
+
+    self.move(
+        geometry.left() + margin,
+        geometry.bottom() - self.height() - margin,
+    )
 
 
 def _patched_handle_error(self, error):
@@ -236,5 +242,6 @@ JarvisWindow.handle_stop_command = _handle_stop_command
 JarvisWindow._start_stop_listener = _start_stop_listener
 JarvisWindow._stop_stop_listener = _stop_stop_listener
 JarvisWindow._stop_listener_finished = _stop_listener_finished
-JarvisWindow._handle_speech_interrupted = _handle_speech_interrupted
+JarvisWindow.tts_response_finished = _patched_tts_response_finished
+JarvisWindow.show_orb_mode = _patched_show_orb_mode
 JarvisWindow.handle_error = _patched_handle_error
