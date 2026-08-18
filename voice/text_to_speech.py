@@ -10,83 +10,39 @@ class TextToSpeech(QObject):
     speaking_started = pyqtSignal()
     speaking_finished = pyqtSignal()
     response_finished = pyqtSignal()
+    speech_interrupted = pyqtSignal()
     level = pyqtSignal(float)
     error = pyqtSignal(str)
-    
-    def __init__(
-        self,
-        rate=180,
-        volume=1.0
-    ):
+
+    def __init__(self, rate=180, volume=1.0):
         super().__init__()
 
         self.rate = rate
         self.volume = volume
 
-        # ====================================================
-        # RESPONSE QUEUE
-        # ====================================================
-
         self.queue = queue.Queue()
-
         self.running = True
-
-        # Complete response currently being built
         self.buffer = ""
 
         self.lock = threading.Lock()
-
+        self.engine_lock = threading.Lock()
+        self.current_engine = None
+        self.stop_requested = False
         self.currently_speaking = False
-
-        # ====================================================
-        # DEDICATED TTS THREAD
-        # ====================================================
 
         self.thread = threading.Thread(
             target=self._run,
             daemon=True
         )
-
         self.thread.start()
 
     # ========================================================
     # TTS THREAD
-    
+    # ========================================================
+
     def _run(self):
-        # ========================================================
-        VOICE_INDEX = 0  # Microsoft David
-        engine = pyttsx3.init("sapi5")
-        voices = engine.getProperty("voices")
-
-        engine.setProperty(
-            "voice",
-            voices[VOICE_INDEX].id
-        )
-
-        engine.setProperty(
-            "rate",
-            180
-        )
-
-        engine.setProperty(
-            "volume",
-            1.0
-        )
-
-        for voice in voices:
-
-            if "David" in voice.name:
-
-                engine.setProperty(
-                    "voice",
-                    voice.id
-                )
-
-                break
-
 
         try:
-
             print("[TTS] TTS worker started.")
 
             while self.running:
@@ -98,104 +54,75 @@ class TextToSpeech(QObject):
 
                 command = item[0]
 
-                # =================================================
-                # SPEAK
-                # =================================================
+                if command != "speak":
+                    continue
 
-                if command == "speak":
+                text = item[1]
 
-                    text = item[1]
+                if not text.strip():
+                    continue
 
-                    if not text.strip():
+                print(f"[TTS] Speaking: {text}")
+
+                engine = None
+                interrupted = False
+
+                try:
+                    engine = pyttsx3.init("sapi5")
+                    voices = engine.getProperty("voices")
+
+                    if voices:
+                        engine.setProperty("voice", voices[0].id)
+
+                    engine.setProperty("rate", 165)
+                    engine.setProperty("volume", 1.0)
+
+                    with self.engine_lock:
+                        self.current_engine = engine
+                        interrupted = self.stop_requested
+
+                    if interrupted:
                         continue
 
-                    print(
-                        f"[TTS] Speaking: {text}"
-                    )
+                    self.currently_speaking = True
+                    self.speaking_started.emit()
 
-                    engine = None
+                    engine.say(text)
+                    engine.runAndWait()
 
+                    with self.engine_lock:
+                        interrupted = self.stop_requested
+
+                except Exception as e:
+                    print(f"[TTS ERROR] {e}")
+                    self.error.emit(str(e))
+
+                finally:
                     try:
+                        if engine:
+                            engine.stop()
+                    except Exception:
+                        pass
 
-                        # ================================================
-                        # CREATE FRESH SAPI5 ENGINE
-                        # ================================================
+                    with self.engine_lock:
+                        self.current_engine = None
+                        self.stop_requested = False
 
-                        engine = pyttsx3.init("sapi5")
+                    self.currently_speaking = False
+                    self.level.emit(0.0)
+                    self.speaking_finished.emit()
 
-                        # Get installed voices
-                        voices = engine.getProperty("voices")
-
-                        # Microsoft David
-                        engine.setProperty(
-                            "voice",
-                            voices[0].id
-                        )
-
-                        # Natural-ish speaking speed
-                        engine.setProperty(
-                            "rate",
-                            165
-                        )
-
-                        engine.setProperty(
-                            "volume",
-                            1.0
-                        )
-
-                        # ================================================
-                        # SPEAK
-                        # ================================================
-
-                        self.currently_speaking = True
-
-                        self.speaking_started.emit()
-
-                        engine.say(text)
-
-                        engine.runAndWait()
-
-                    except Exception as e:
-
-                        print(
-                            f"[TTS ERROR] {e}"
-                        )
-
-                        self.error.emit(
-                            str(e)
-                        )
-
-                    finally:
-
-                        try:
-
-                            if engine:
-                                engine.stop()
-
-                        except Exception:
-                            pass
-
-                        engine = None
-
-                        self.currently_speaking = False
-
-                        self.level.emit(0.0)
-
-                        self.speaking_finished.emit()
-
+                    if interrupted:
+                        print("[TTS] Speech interrupted.")
+                        self.speech_interrupted.emit()
+                    else:
                         self.response_finished.emit()
 
             print("[TTS] TTS worker stopped.")
 
         except Exception as e:
-
-            print(
-                f"[TTS WORKER ERROR] {e}"
-            )
-
-            self.error.emit(
-                str(e)
-            )
+            print(f"[TTS WORKER ERROR] {e}")
+            self.error.emit(str(e))
 
     # ========================================================
     # FEED TOKEN
@@ -207,12 +134,7 @@ class TextToSpeech(QObject):
             return
 
         with self.lock:
-
             self.buffer += token
-
-        print(
-            f"[TTS FEED] {repr(token)}"
-        )
 
     # ========================================================
     # RESPONSE FINISHED
@@ -221,28 +143,14 @@ class TextToSpeech(QObject):
     def finish_response(self):
 
         with self.lock:
-
             text = self.buffer.strip()
-
             self.buffer = ""
 
         if not text:
             return
 
-        print(
-            "[TTS] Response complete."
-        )
-
-        print(
-            f"[TTS] Queueing: {text}"
-        )
-
-        self.queue.put(
-            (
-                "speak",
-                text
-            )
-        )
+        print(f"[TTS] Queueing: {text}")
+        self.queue.put(("speak", text))
 
     # ========================================================
     # STOP CURRENT SPEECH
@@ -251,25 +159,28 @@ class TextToSpeech(QObject):
     def stop_speaking(self):
 
         with self.lock:
-
             self.buffer = ""
 
-        # ---------------------------------------------
-        # Clear pending responses
-        # ---------------------------------------------
-
+        # Clear any response that has not started speaking yet.
         try:
-
             while True:
-
                 self.queue.get_nowait()
-
         except queue.Empty:
             pass
 
-        print(
-            "[TTS] Pending speech cleared."
-        )
+        with self.engine_lock:
+            self.stop_requested = True
+            engine = self.current_engine
+
+        # pyttsx3.runAndWait() is blocking, so stopping the active
+        # SAPI5 engine is required for a real-time interruption.
+        if engine is not None:
+            try:
+                engine.stop()
+            except Exception as e:
+                print(f"[TTS] Could not stop engine: {e}")
+
+        print("[TTS] Current speech interrupted / pending speech cleared.")
 
     # ========================================================
     # SHUTDOWN
@@ -278,13 +189,8 @@ class TextToSpeech(QObject):
     def shutdown(self):
 
         self.running = False
-
-        self.queue.put(
-            None
-        )
+        self.stop_speaking()
+        self.queue.put(None)
 
         if self.thread.is_alive():
-
-            self.thread.join(
-                timeout=2
-            )
+            self.thread.join(timeout=2)
