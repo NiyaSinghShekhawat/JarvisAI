@@ -19,6 +19,7 @@ from PyQt6.QtGui import (
 )
 
 from PyQt6.QtWidgets import (
+    QApplication,
     QMainWindow,
     QWidget,
     QVBoxLayout,
@@ -32,6 +33,7 @@ from PyQt6.QtWidgets import (
 from backend.brain.router import process_request_stream
 from voice.voice_worker import VoiceWorker
 from voice.text_to_speech import TextToSpeech
+from voice.wake_word import WakeWordWorker
 
 # ============================================================
 # COLORS
@@ -101,30 +103,21 @@ class JarvisWorker(QThread):
 
 class JarvisOrb(QWidget):
     """
-    Central Jarvis orb.
+    Small transparent Jarvis orb.
 
-    Current states:
+    States:
         idle
         listening
         processing
         speaking
 
-    Later:
-        set_audio_level() can be connected directly
-        to microphone amplitude.
-
-        set_speaking_level() can be connected directly
-        to TTS audio amplitude.
+    Designed for the bottom-left floating orb mode.
     """
 
     def __init__(self):
         super().__init__()
 
-        self.setMinimumSize(420, 420)
-        self.setSizePolicy(
-            QSizePolicy.Policy.Expanding,
-            QSizePolicy.Policy.Expanding
-        )
+        self.setFixedSize(150, 150)
 
         self.state = "idle"
 
@@ -142,7 +135,9 @@ class JarvisOrb(QWidget):
     # --------------------------------------------------------
 
     def set_state(self, state):
+
         self.state = state
+
         self.update()
 
     # --------------------------------------------------------
@@ -150,11 +145,6 @@ class JarvisOrb(QWidget):
     # --------------------------------------------------------
 
     def set_audio_level(self, level):
-        """
-        level should be between 0.0 and 1.0.
-
-        This will later receive real microphone amplitude.
-        """
 
         self.audio_level = max(
             0.0,
@@ -168,11 +158,6 @@ class JarvisOrb(QWidget):
     # --------------------------------------------------------
 
     def set_speaking_level(self, level):
-        """
-        level should be between 0.0 and 1.0.
-
-        Later this will be driven by Jarvis's TTS audio.
-        """
 
         self.speaking_level = max(
             0.0,
@@ -186,26 +171,38 @@ class JarvisOrb(QWidget):
     # --------------------------------------------------------
 
     def animate(self):
+
         self.phase += 0.055
 
+        # LISTENING
         if self.state == "listening":
-            # Temporary simulated movement until microphone
-            # amplitude is connected.
-            simulated = (
-                math.sin(self.phase * 2.7) * 0.5 + 0.5
-            )
 
-            self.audio_level *= 0.85
+            self.audio_level *= 0.88
 
             if self.audio_level < 0.02:
-                self.audio_level = simulated * 0.10
 
-            elif self.state == "speaking":
+                simulated = (
+                    math.sin(self.phase * 2.7) * 0.5
+                    + 0.5
+                )
 
-                # Real TTS activity drives the orb.
-                self.speaking_level *= 0.92
+                self.audio_level = (
+                    simulated * 0.08
+                )
 
+        # SPEAKING
+        elif self.state == "speaking":
+
+            self.speaking_level *= 0.92
+
+        # PROCESSING
+        elif self.state == "processing":
+
+            pass
+
+        # IDLE
         else:
+
             self.audio_level *= 0.90
             self.speaking_level *= 0.90
 
@@ -228,94 +225,70 @@ class JarvisOrb(QWidget):
             self.height() / 2
         )
 
-        base_radius = min(
-            self.width(),
-            self.height()
-        ) * 0.30
+        # Small orb
+        base_radius = 32
 
         # ----------------------------------------------------
-        # STATE COLOR
+        # COLORS BASED ON STATE
         # ----------------------------------------------------
 
         if self.state == "listening":
+
             primary = GREEN
             secondary = GREEN_BRIGHT
 
-            response_level = self.audio_level
+            activity = self.audio_level
 
         elif self.state == "speaking":
+
             primary = BLUE_BRIGHT
             secondary = BLUE
 
-            response_level = self.speaking_level
+            activity = self.speaking_level
 
         elif self.state == "processing":
+
             primary = BLUE
             secondary = BLUE_BRIGHT
 
-            response_level = (
-                math.sin(self.phase * 2) * 0.5 + 0.5
-            ) * 0.12
+            activity = (
+                math.sin(self.phase * 2.2) * 0.5
+                + 0.5
+            )
+
+            activity *= 0.18
 
         else:
+
             primary = BLUE
-            secondary = GREEN
+            secondary = BLUE_BRIGHT
 
-            response_level = 0.03
+            # Small idle breathing glow
+            activity = (
+                math.sin(self.phase * 1.5) * 0.5
+                + 0.5
+            )
+
+            activity *= 0.08
 
         # ----------------------------------------------------
-        # OUTER RADAR RINGS
-        # ----------------------------------------------------
-
-        for i in range(5):
-
-            ring_radius = (
-                base_radius
-                + 22
-                + (i * 18)
-            )
-
-            opacity = max(
-                20,
-                90 - i * 15
-            )
-
-            pen = QPen(
-                QColor(
-                    primary.red(),
-                    primary.green(),
-                    primary.blue(),
-                    opacity
-                )
-            )
-
-            pen.setWidth(1)
-
-            painter.setPen(pen)
-            painter.setBrush(Qt.BrushStyle.NoBrush)
-
-            painter.drawEllipse(
-                center,
-                ring_radius,
-                ring_radius
-            )
-
-        # ----------------------------------------------------
-        # AUDIO EXPANSION
+        # DYNAMIC SIZE
         # ----------------------------------------------------
 
         dynamic_radius = (
             base_radius
-            + response_level * 70
+            + activity * 7
         )
 
         # ----------------------------------------------------
-        # OUTER GLOW
+        # OUTER SOFT GLOW
         # ----------------------------------------------------
+
+        glow_radius = dynamic_radius * 1.75
 
         glow = QRadialGradient(
             center,
-            dynamic_radius * 1.7
+            glow_radius
         )
 
         glow.setColorAt(
@@ -324,17 +297,27 @@ class JarvisOrb(QWidget):
                 primary.red(),
                 primary.green(),
                 primary.blue(),
-                80
+                70
             )
         )
 
         glow.setColorAt(
-            0.45,
+            0.35,
             QColor(
                 primary.red(),
                 primary.green(),
                 primary.blue(),
                 30
+            )
+        )
+
+        glow.setColorAt(
+            0.70,
+            QColor(
+                primary.red(),
+                primary.green(),
+                primary.blue(),
+                8
             )
         )
 
@@ -348,58 +331,95 @@ class JarvisOrb(QWidget):
             )
         )
 
-        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setPen(
+            Qt.PenStyle.NoPen
+        )
+
         painter.setBrush(glow)
 
         painter.drawEllipse(
             center,
-            dynamic_radius * 1.7,
-            dynamic_radius * 1.7
+            glow_radius,
+            glow_radius
         )
 
         # ----------------------------------------------------
-        # ORB BODY
+        # OUTER THIN GLOWING RING
         # ----------------------------------------------------
 
-        gradient = QRadialGradient(
-            center - QPointF(
-                dynamic_radius * 0.25,
-                dynamic_radius * 0.25
-            ),
-            dynamic_radius * 1.3
-        )
-
-        gradient.setColorAt(
-            0.0,
-            QColor("#071C2C")
-        )
-
-        gradient.setColorAt(
-            0.45,
-            QColor("#04131F")
-        )
-
-        gradient.setColorAt(
-            0.82,
+        ring_pen = QPen(
             QColor(
                 primary.red(),
                 primary.green(),
                 primary.blue(),
-                70
+                210
             )
         )
 
-        gradient.setColorAt(
+        ring_pen.setWidth(1)
+
+        painter.setPen(ring_pen)
+
+        painter.setBrush(
+            Qt.BrushStyle.NoBrush
+        )
+
+        painter.drawEllipse(
+            center,
+            dynamic_radius + 2,
+            dynamic_radius + 2
+        )
+
+        # ----------------------------------------------------
+        # INNER ORB
+        # ----------------------------------------------------
+
+        orb_gradient = QRadialGradient(
+            center - QPointF(
+                dynamic_radius * 0.30,
+                dynamic_radius * 0.30
+            ),
+            dynamic_radius * 1.4
+        )
+
+        orb_gradient.setColorAt(
+            0.0,
+            QColor("#0A263A")
+        )
+
+        orb_gradient.setColorAt(
+            0.45,
+            QColor("#041521")
+        )
+
+        orb_gradient.setColorAt(
+            0.78,
+            QColor(
+                primary.red(),
+                primary.green(),
+                primary.blue(),
+                35
+            )
+        )
+
+        orb_gradient.setColorAt(
             1.0,
             QColor("#02070D")
         )
 
-        painter.setBrush(gradient)
+        painter.setBrush(
+            orb_gradient
+        )
 
         painter.setPen(
             QPen(
-                primary,
-                2
+                QColor(
+                    primary.red(),
+                    primary.green(),
+                    primary.blue(),
+                    230
+                ),
+                1
             )
         )
 
@@ -410,102 +430,75 @@ class JarvisOrb(QWidget):
         )
 
         # ----------------------------------------------------
-        # INNER CORE
+        # SMALL INNER GLOW
         # ----------------------------------------------------
 
-        core_radius = dynamic_radius * 0.72
+        inner_radius = dynamic_radius * 0.65
 
-        core_gradient = QRadialGradient(
+        inner_gradient = QRadialGradient(
             center,
-            core_radius
+            inner_radius
         )
 
-        core_gradient.setColorAt(
+        inner_gradient.setColorAt(
             0.0,
             QColor(
                 primary.red(),
                 primary.green(),
                 primary.blue(),
-                22
+                20
             )
         )
 
-        core_gradient.setColorAt(
+        inner_gradient.setColorAt(
             1.0,
-            QColor(0, 0, 0, 0)
+            QColor(
+                primary.red(),
+                primary.green(),
+                primary.blue(),
+                0
+            )
         )
 
-        painter.setBrush(core_gradient)
-        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setPen(
+            Qt.PenStyle.NoPen
+        )
+
+        painter.setBrush(
+            inner_gradient
+        )
 
         painter.drawEllipse(
             center,
-            core_radius,
-            core_radius
+            inner_radius,
+            inner_radius
         )
-
-        # ----------------------------------------------------
-        # ORBIT DOTS
-        # ----------------------------------------------------
-
-        for i in range(12):
-
-            angle = (
-                self.phase * 0.5
-                + (math.pi * 2 / 12) * i
-            )
-
-            orbit_radius = (
-                dynamic_radius + 15
-            )
-
-            x = (
-                center.x()
-                + math.cos(angle)
-                * orbit_radius
-            )
-
-            y = (
-                center.y()
-                + math.sin(angle)
-                * orbit_radius
-            )
-
-            dot_radius = 2.2
-
-            painter.setBrush(
-                QColor(
-                    secondary.red(),
-                    secondary.green(),
-                    secondary.blue(),
-                    150
-                )
-            )
-
-            painter.drawEllipse(
-                QPointF(x, y),
-                dot_radius,
-                dot_radius
-            )
 
         # ----------------------------------------------------
         # JARVIS TEXT
         # ----------------------------------------------------
 
-        painter.setPen(TEXT)
+        painter.setPen(
+            QColor(
+                220,
+                238,
+                255,
+                235
+            )
+        )
 
         font = QFont(
             "Segoe UI",
-            18
-        )
-
-        font.setLetterSpacing(
-            QFont.SpacingType.AbsoluteSpacing,
-            8
+            7
         )
 
         font.setWeight(
             QFont.Weight.Light
+        )
+
+        font.setLetterSpacing(
+            QFont.SpacingType.AbsoluteSpacing,
+            2.2
         )
 
         painter.setFont(font)
@@ -528,8 +521,6 @@ class JarvisOrb(QWidget):
         )
 
         painter.end()
-
-
 # ============================================================
 # STATUS LABEL
 # ============================================================
@@ -660,6 +651,15 @@ class JarvisWindow(QMainWindow):
         self.voice_thread = None
         self.voice_worker = None
 
+        self.wake_worker = None
+        self.jarvis_mode = "full"
+        self.wake_active = False
+        # Keep a reference to the normal full UI.
+        self.full_central = None
+
+        # Orb-only floating window container.
+        self.orb_container = None
+
         # ========================================================
         # TEXT TO SPEECH
         # ========================================================
@@ -718,6 +718,8 @@ class JarvisWindow(QMainWindow):
     def build_ui(self):
 
         central = QWidget()
+        self.full_central = central
+
         self.setCentralWidget(central)
 
         root = QVBoxLayout(central)
@@ -735,9 +737,9 @@ class JarvisWindow(QMainWindow):
         # TOP BAR
         # ----------------------------------------------------
 
-        top = QHBoxLayout()
+        self.top = QHBoxLayout()
 
-        top.setContentsMargins(
+        self.top.setContentsMargins(
             0,
             0,
             0,
@@ -756,9 +758,9 @@ class JarvisWindow(QMainWindow):
             """
         )
 
-        top.addWidget(logo)
+        self.top.addWidget(logo)
 
-        top.addStretch()
+        self.top.addStretch()
 
         title = QLabel("J A R V I S")
 
@@ -773,9 +775,9 @@ class JarvisWindow(QMainWindow):
             """
         )
 
-        top.addWidget(title)
+        self.top.addWidget(title)
 
-        top.addStretch()
+        self.top.addStretch()
 
         # Window controls
         minimize = QPushButton("—")
@@ -810,10 +812,10 @@ class JarvisWindow(QMainWindow):
             self.close
         )
 
-        top.addWidget(minimize)
-        top.addWidget(close)
+        self.top.addWidget(minimize)
+        self.top.addWidget(close)
 
-        root.addLayout(top)
+        root.addLayout(self.top)
 
         # ----------------------------------------------------
         # MAIN CONTENT
@@ -990,9 +992,9 @@ class JarvisWindow(QMainWindow):
         # BOTTOM BAR
         # ----------------------------------------------------
 
-        bottom = QHBoxLayout()
+        self.bottom = QHBoxLayout()
 
-        bottom.setContentsMargins(
+        self.bottom.setContentsMargins(
             0,
             12,
             0,
@@ -1015,19 +1017,19 @@ class JarvisWindow(QMainWindow):
             "Keyboard input"
         )
 
-        bottom.addWidget(
+        self.bottom.addWidget(
             mic_button
         )
 
-        bottom.addWidget(
+        self.bottom.addWidget(
             wave_button
         )
 
-        bottom.addWidget(
+        self.bottom.addWidget(
             keyboard_button
         )
 
-        bottom.addStretch()
+        self.bottom.addStretch()
 
         # RIGHT
         weather_button = IconButton(
@@ -1050,23 +1052,23 @@ class JarvisWindow(QMainWindow):
             "Settings"
         )
 
-        bottom.addWidget(
+        self.bottom.addWidget(
             weather_button
         )
 
-        bottom.addWidget(
+        self.bottom.addWidget(
             gmail_button
         )
 
-        bottom.addWidget(
+        self.bottom.addWidget(
             web_button
         )
 
-        bottom.addWidget(
+        self.bottom.addWidget(
             settings_button
         )
 
-        root.addLayout(bottom)
+        root.addLayout(self.bottom)
 
         # ----------------------------------------------------
         # CONNECTIONS
@@ -1081,12 +1083,11 @@ class JarvisWindow(QMainWindow):
     # ========================================================
 
     def send_message(self):
+
         user_input = self.input.text().strip()
 
         if not user_input:
             return
-
-        
 
         self.input.clear()
 
@@ -1095,11 +1096,10 @@ class JarvisWindow(QMainWindow):
 
         self.set_processing_state()
 
-        self.start_worker(user_input)
+        self.start_worker(
+            user_input
+        )
 
-        self.worker.failed.connect()
-        self.response_error
-        
         self.tts.stop_speaking()
 
     # ========================================================
@@ -1209,10 +1209,18 @@ class JarvisWindow(QMainWindow):
             "processing"
         )
 
-        self.status.set_status(
-            "●  THINKING",
-            "#008CFF"
-        )
+        if self.jarvis_mode == "full":
+
+            self.status.set_status(
+                "●  THINKING",
+                "#008CFF"
+            )
+
+            self.status.show()
+
+        else:
+
+            self.status.hide()
 
     def set_response_state(self, response):
 
@@ -1245,18 +1253,36 @@ class JarvisWindow(QMainWindow):
             "listening"
         )
 
-        self.status.set_status(
-            "●  LISTENING",
-            "#00E89A"
-        )
+        # ========================================================
+        # FULL MODE UI
+        # ========================================================
 
-        self.interpreted_label.setText(
-            "Listening..."
-        )
+        if self.jarvis_mode == "full":
 
-        self.interpreted_label.show()
+            self.status.set_status(
+                "●  LISTENING",
+                "#00E89A"
+            )
 
-        self.response_label.hide()
+            self.interpreted_label.setText(
+                "Listening..."
+            )
+
+            self.interpreted_label.show()
+
+            self.response_label.hide()
+
+        # ========================================================
+        # ORB MODE
+        # ========================================================
+
+        else:
+
+            # Absolutely nothing except the orb.
+            self.status.hide()
+            self.interpreted_label.hide()
+            self.response_label.hide()
+            self.input.hide()
 
         # ========================================================
         # VOICE THREAD
@@ -1270,27 +1296,22 @@ class JarvisWindow(QMainWindow):
             self.voice_thread
         )
 
-        # Start recording
         self.voice_thread.started.connect(
             self.voice_worker.run
         )
 
-        # Microphone amplitude -> orb
         self.voice_worker.level.connect(
             self.update_microphone_level
         )
 
-        # Speech recognized
         self.voice_worker.transcript.connect(
             self.handle_voice_transcript
         )
 
-        # Errors
         self.voice_worker.error.connect(
             self.handle_voice_error
         )
 
-        # Cleanup
         self.voice_worker.finished.connect(
             self.voice_thread.quit
         )
@@ -1334,10 +1355,18 @@ class JarvisWindow(QMainWindow):
             "speaking"
         )
 
-        self.status.set_status(
-            "●  JARVIS SPEAKING",
-            "#29B6FF"
-        )
+        if self.jarvis_mode == "full":
+
+            self.status.set_status(
+                "●  JARVIS SPEAKING",
+                "#29B6FF"
+            )
+
+            self.status.show()
+
+        else:
+
+            self.status.hide()
 
 
     def tts_finished(self):
@@ -1349,18 +1378,27 @@ class JarvisWindow(QMainWindow):
 
     def tts_response_finished(self):
 
-        self.orb.set_speaking_level(
-            0.0
-        )
+        self.orb.set_speaking_level(0.0)
 
-        self.orb.set_state(
-            "idle"
-        )
+        self.orb.set_state("idle")
 
-        self.status.set_status(
-            "●  IDLE",
-            "#527086"
-        )
+        if self.jarvis_mode == "full":
+
+            self.status.set_status(
+                "●  IDLE",
+                "#527086"
+            )
+
+            self.status.show()
+
+        # If we were activated through the orb,
+        # go back to passive wake listening.
+        if self.jarvis_mode == "orb":
+
+            QTimer.singleShot(
+                500,
+                self.start_wake_listener
+            )
 
 
     def tts_error(self, error):
@@ -1383,44 +1421,75 @@ class JarvisWindow(QMainWindow):
     def handle_voice_transcript(self, text):
 
         if not text:
-            self.status.set_status(
-                "●  DIDN'T HEAR THAT",
-                "#FFAA44"
-            )
 
             self.orb.set_state(
                 "idle"
             )
 
+            if self.jarvis_mode == "full":
+
+                self.status.set_status(
+                    "●  DIDN'T HEAR THAT",
+                    "#FFAA44"
+                )
+
+            else:
+
+                print(
+                    "[JARVIS] Didn't hear anything."
+                )
+
             return
 
         self.tts.stop_speaking()
 
-        # ========================================================
-        # SHOW WHAT JARVIS HEARD
-        # ========================================================
-
-        self.interpreted_label.setText(
-            f'"{text}"'
+        print(
+            f"[JARVIS] Heard command: {text}"
         )
 
-        self.interpreted_label.show()
-
         # ========================================================
-        # PREPARE RESPONSE
+        # FULL MODE
         # ========================================================
 
-        self.response_label.clear()
-        self.response_label.show()
+        if self.jarvis_mode == "full":
+
+            self.interpreted_label.setText(
+                f'"{text}"'
+            )
+
+            self.interpreted_label.show()
+
+            self.response_label.clear()
+            self.response_label.show()
 
         # ========================================================
-        # NOW THINK
+        # ORB MODE
+        # ========================================================
+
+        else:
+
+            # Absolutely nothing except the orb.
+            self.interpreted_label.hide()
+            self.response_label.hide()
+            self.status.hide()
+            self.input.hide()
+
+        # ========================================================
+        # THINK
         # ========================================================
 
         self.set_processing_state()
 
+        # Keep orb-only UI hidden.
+        if self.jarvis_mode == "orb":
+
+            self.status.hide()
+            self.interpreted_label.hide()
+            self.response_label.hide()
+            self.input.hide()
+
         # ========================================================
-        # SEND TO EXISTING ROUTER
+        # SEND TO ROUTER
         # ========================================================
 
         self.start_worker(
@@ -1428,19 +1497,364 @@ class JarvisWindow(QMainWindow):
         )
 
     def handle_voice_error(self, error):
+
         self.orb.set_state(
             "idle"
         )
-        self.status.set_status(
-            "●  MICROPHONE ERROR",
-            "#FF5577"
-        )
-        self.interpreted_label.setText(
-            error
-        )
-        self.interpreted_label.show()
+
+        if self.jarvis_mode == "full":
+
+            self.status.set_status(
+                "●  MICROPHONE ERROR",
+                "#FF5577"
+            )
+
+            self.status.show()
+
+            self.interpreted_label.setText(
+                error
+            )
+
+            self.interpreted_label.show()
+
+        else:
+
+            print(
+                f"[JARVIS] Microphone error: {error}"
+            )
+
+            self.status.hide()
+            self.interpreted_label.hide()
+            self.response_label.hide()
+            self.input.hide()
 
 
     def voice_finished(self):
         self.voice_thread = None
         self.voice_worker = None
+
+    def start_wake_listener(self):
+
+        if self.wake_worker is not None:
+            return
+
+        print("[JARVIS] Starting wake listener...")
+
+        self.wake_worker = WakeWordWorker()
+
+        self.wake_worker.wake_detected.connect(
+            self.handle_wake
+        )
+
+        self.wake_worker.error.connect(
+            self.handle_voice_error
+        )
+
+        self.wake_worker.start()
+
+        self.wake_active = True
+
+    def stop_wake_listener(self):
+
+        if self.wake_worker is None:
+            return
+
+        print("[JARVIS] Stopping wake listener...")
+
+        self.wake_worker.stop()
+        self.wake_worker.wait(1500)
+
+        self.wake_worker = None
+
+        self.wake_active = False
+
+    def handle_wake(self, wake_type):
+
+        print(
+            f"[JARVIS] Wake event: {wake_type}"
+        )
+
+        # Stop passive listening before VoiceWorker
+        # takes control of the microphone.
+        self.stop_wake_listener()
+
+        if wake_type == "clap":
+
+            print(
+                "[JARVIS] Opening full interface."
+            )
+
+            self.show_full_mode()
+
+        elif wake_type == "voice":
+
+            print(
+                "[JARVIS] Opening orb mode."
+            )
+
+            self.show_orb_mode()
+
+        # Start actual conversation listening
+        self.activate_voice()
+
+    def show_full_mode(self):
+
+        print("[JARVIS] Switching to full interface.")
+
+        self.jarvis_mode = "full"
+
+        # ========================================================
+        # RESTORE WINDOW FLAGS
+        # ========================================================
+
+        self.setWindowFlags(
+            Qt.WindowType.Window
+        )
+
+        self.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground,
+            False
+        )
+
+        self.setAttribute(
+            Qt.WidgetAttribute.WA_NoSystemBackground,
+            False
+        )
+
+        # ========================================================
+        # REMOVE ORB CONTAINER
+        # ========================================================
+
+        if self.orb_container is not None:
+
+            self.orb_container.hide()
+
+            self.orb.setParent(
+                self.full_central
+            )
+
+            self.orb_container.deleteLater()
+
+            self.orb_container = None
+
+        # ========================================================
+        # RESTORE FULL UI
+        # ========================================================
+
+        self.setCentralWidget(
+            self.full_central
+        )
+
+        self.full_central.show()
+
+        # ========================================================
+        # RESTORE UI ELEMENTS
+        # ========================================================
+
+        if self.top is not None:
+            # top is a layout, so DON'T call show/hide on it
+            pass
+
+        if self.status is not None:
+            self.status.show()
+
+        if self.interpreted_label is not None:
+            self.interpreted_label.hide()
+
+        if self.response_label is not None:
+            self.response_label.hide()
+
+        if self.input is not None:
+            self.input.show()
+
+        if self.bottom is not None:
+            # bottom is also a layout
+            pass
+
+        # ========================================================
+        # RESTORE SIZE
+        # ========================================================
+
+        self.setMinimumSize(
+            900,
+            700
+        )
+
+        self.resize(
+            1200,
+            850
+        )
+
+        # ========================================================
+        # CENTER WINDOW
+        # ========================================================
+
+        screen = self.screen()
+
+        if screen is None:
+            screen = QApplication.primaryScreen()
+
+        geometry = screen.availableGeometry()
+
+        self.move(
+            geometry.center()
+            - self.rect().center()
+        )
+
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+        print(
+            "[JARVIS] Full interface restored."
+        )
+
+    def show_orb_mode(self):
+
+        self.jarvis_mode = "orb"
+
+        print("[JARVIS] Switching to bottom-left orb mode.")
+
+        # ========================================================
+        # HIDE FULL UI
+        # ========================================================
+
+        if self.status is not None:
+            self.status.hide()
+
+        if self.interpreted_label is not None:
+            self.interpreted_label.hide()
+
+        if self.response_label is not None:
+            self.response_label.hide()
+
+        if self.input is not None:
+            self.input.hide()
+
+        # ========================================================
+        # CREATE ORB-ONLY CONTAINER
+        # ========================================================
+
+        self.orb_container = QWidget()
+
+        self.orb_container.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground,
+            True
+        )
+
+        self.orb_container.setStyleSheet(
+            "background: transparent;"
+        )
+
+        orb_layout = QVBoxLayout(
+            self.orb_container
+        )
+
+        orb_layout.setContentsMargins(
+            10,
+            10,
+            10,
+            10
+        )
+
+        orb_layout.setAlignment(
+            Qt.AlignmentFlag.AlignCenter
+        )
+
+        # ========================================================
+        # MOVE ORB INTO CONTAINER
+        # ========================================================
+
+        self.orb.setParent(
+            self.orb_container
+        )
+
+        self.orb.show()
+
+        orb_layout.addWidget(
+            self.orb,
+            alignment=Qt.AlignmentFlag.AlignCenter
+        )
+
+        # ========================================================
+        # SWITCH CENTRAL WIDGET
+        # ========================================================
+
+        self.setCentralWidget(
+            self.orb_container
+        )
+
+        # ========================================================
+        # WINDOW FLAGS
+        # ========================================================
+
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            |
+            Qt.WindowType.Tool
+            |
+            Qt.WindowType.WindowStaysOnTopHint
+        )
+
+        self.setAttribute(
+            Qt.WidgetAttribute.WA_TranslucentBackground,
+            True
+        )
+
+        # ========================================================
+        # SMALL FLOATING WINDOW
+        # ========================================================
+
+        self.setMinimumSize(
+            0,
+            0
+        )
+
+        self.setMaximumSize(
+            180,
+            180
+        )
+
+        self.resize(
+            180,
+            180
+        )
+
+        # ========================================================
+        # BOTTOM-LEFT POSITION
+        # ========================================================
+
+        screen = self.screen()
+
+        if screen is None:
+            screen = QApplication.primaryScreen()
+
+        geometry = screen.availableGeometry()
+
+        margin = 8
+
+        x = geometry.left() + margin
+
+        y = (
+            geometry.bottom()
+            - self.height()
+            - margin
+        )
+
+        self.move(
+            x,
+            y
+        )
+
+        # ========================================================
+        # SHOW
+        # ========================================================
+
+        self.show()
+        self.raise_()
+        self.activateWindow()
+
+        print(
+            f"[JARVIS] Orb positioned at bottom-left: "
+            f"x={x}, y={y}"
+        )
