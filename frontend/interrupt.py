@@ -125,6 +125,8 @@ JarvisOrb.paintEvent = _larger_orb_paint
 
 _original_window_init = JarvisWindow.__init__
 _original_start_worker = JarvisWindow.start_worker
+_original_add_response_token = JarvisWindow.add_response_token
+_original_handle_response = JarvisWindow.handle_response
 _original_handle_error = JarvisWindow.handle_error
 _original_tts_response_finished = JarvisWindow.tts_response_finished
 _original_show_orb_mode = JarvisWindow.show_orb_mode
@@ -173,6 +175,23 @@ def _patched_start_worker(self, message):
     self.response_cancelled = False
     _original_start_worker(self, message)
     self._start_stop_listener()
+
+
+def _patched_add_response_token(self, token):
+    # Jarvis may finish generating the current answer after the user says
+    # "Jarvis stop". Never feed those late tokens back into TTS/UI.
+    if self.response_cancelled:
+        return
+
+    _original_add_response_token(self, token)
+
+
+def _patched_handle_response(self, result):
+    if self.response_cancelled:
+        self.tts.stop_speaking()
+        return
+
+    _original_handle_response(self, result)
 
 
 def _handle_stop_command(self):
@@ -238,6 +257,8 @@ def _patched_handle_error(self, error):
 
 JarvisWindow.__init__ = _patched_window_init
 JarvisWindow.start_worker = _patched_start_worker
+JarvisWindow.add_response_token = _patched_add_response_token
+JarvisWindow.handle_response = _patched_handle_response
 JarvisWindow.handle_stop_command = _handle_stop_command
 JarvisWindow._start_stop_listener = _start_stop_listener
 JarvisWindow._stop_stop_listener = _stop_stop_listener
