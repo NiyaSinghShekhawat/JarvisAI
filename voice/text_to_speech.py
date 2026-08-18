@@ -74,8 +74,8 @@ class TextToSpeech(QObject):
                     if voices:
                         engine.setProperty("voice", voices[0].id)
 
-                    engine.setProperty("rate", 165)
-                    engine.setProperty("volume", 1.0)
+                    engine.setProperty("rate", self.rate)
+                    engine.setProperty("volume", self.volume)
 
                     with self.engine_lock:
                         self.current_engine = engine
@@ -161,24 +161,33 @@ class TextToSpeech(QObject):
         with self.lock:
             self.buffer = ""
 
-        # Clear any response that has not started speaking yet.
+        # Clear responses that have not started speaking yet.
         try:
             while True:
                 self.queue.get_nowait()
         except queue.Empty:
             pass
 
+        # IMPORTANT:
+        # Do not set stop_requested when nothing is currently speaking.
+        # The UI calls stop_speaking() before starting a new response, and
+        # setting this flag in that situation used to cancel the next TTS job.
         with self.engine_lock:
-            self.stop_requested = True
             engine = self.current_engine
 
-        # pyttsx3.runAndWait() is blocking, so stopping the active
-        # SAPI5 engine is required for a real-time interruption.
-        if engine is not None:
-            try:
-                engine.stop()
-            except Exception as e:
-                print(f"[TTS] Could not stop engine: {e}")
+            if engine is None or not self.currently_speaking:
+                self.stop_requested = False
+                print("[TTS] No active speech. Pending speech cleared.")
+                return
+
+            self.stop_requested = True
+
+        # pyttsx3.runAndWait() is blocking, so stopping the active SAPI5
+        # engine is required for a real-time interruption.
+        try:
+            engine.stop()
+        except Exception as e:
+            print(f"[TTS] Could not stop engine: {e}")
 
         print("[TTS] Current speech interrupted / pending speech cleared.")
 
