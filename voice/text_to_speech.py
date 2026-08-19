@@ -1,3 +1,4 @@
+import gc
 import queue
 import threading
 
@@ -6,6 +7,7 @@ from PyQt6.QtCore import QObject, pyqtSignal
 
 
 class TextToSpeech(QObject):
+    """Thread-isolated Windows SAPI5 text-to-speech service."""
 
     speaking_started = pyqtSignal()
     speaking_finished = pyqtSignal()
@@ -37,108 +39,96 @@ class TextToSpeech(QObject):
         )
         self.thread.start()
 
-    # ========================================================
-    # TTS THREAD
-    # ========================================================
-
     def _run(self):
-        """Own the SAPI5 engine for the entire lifetime of this thread."""
         import pythoncom
 
-        engine = None
+        pythoncom.CoInitialize()
+        print("[TTS] COM initialized.")
+        print("[TTS] TTS worker started.")
 
         try:
-            pythoncom.CoInitialize()
-            print("[TTS] COM initialized.")
-            print("[TTS] TTS worker started.")
-
-            engine = pyttsx3.init("sapi5")
-            voices = engine.getProperty("voices")
-
-            if voices:
-                engine.setProperty("voice", voices[0].id)
-                print(f"[TTS] Voice: {voices[0].name}")
-
-            engine.setProperty("rate", self.rate)
-            engine.setProperty("volume", self.volume)
-
-            with self.engine_lock:
-                self.current_engine = engine
-
             while self.running:
                 item = self.queue.get()
 
+                if item is None:
+                    break
+
+                if item[0] != "speak":
+                    continue
+
+                text = item[1]
+                if not text or not text.strip():
+                    continue
+
+                # IMPORTANT: create a fresh SAPI5 engine for every response.
+                # On Windows, reusing one pyttsx3 SAPI5 instance across
+                # multiple runAndWait() cycles can silently fail after the
+                # first utterance. The COM thread itself remains persistent.
+                with self.engine_lock:
+                    if self.stop_requested:
+                        self.stop_requested = False
+                        continue
+                    self.currently_speaking = True
+
+                engine = None
+                interrupted = False
+
                 try:
-                    if item is None:
-                        break
+                    engine = pyttsx3.init("sapi5")
+                    voices = engine.getProperty("voices")
 
-                    command = item[0]
-                    if command != "speak":
-                        continue
+                    if voices:
+                        engine.setProperty("voice", voices[0].id)
+                        print(f"[TTS] Voice: {voices[0].name}")
 
-                    text = item[1]
-                    if not text or not text.strip():
-                        continue
+                    engine.setProperty("rate", self.rate)
+                    engine.setProperty("volume", self.volume)
 
-                    # A stop requested before this item began means this
-                    # response was cancelled. Do not poison future responses.
                     with self.engine_lock:
-                        if self.stop_requested:
-                            self.stop_requested = False
-                            continue
-                        self.currently_speaking = True
+                        self.current_engine = engine
+                        interrupted = self.stop_requested
+
+                    if interrupted:
+                        continue
 
                     print(f"[TTS] Speaking: {text}")
                     self.speaking_started.emit()
 
-                    interrupted = False
-                    failed = False
+                    engine.say(text)
+                    engine.runAndWait()
 
-                    try:
-                        engine.say(text)
-                        engine.runAndWait()
+                    with self.engine_lock:
+                        interrupted = self.stop_requested
 
-                        with self.engine_lock:
-                            interrupted = self.stop_requested
-
-                    except Exception as e:
-                        failed = True
-                        print(f"[TTS ERROR] {e}")
-                        self.error.emit(str(e))
-
-                    finally:
-                        with self.engine_lock:
-                            interrupted = interrupted or self.stop_requested
-                            self.currently_speaking = False
-
-                        # IMPORTANT:
-                        # Do NOT call engine.stop() after a normal response.
-                        # SAPI5 can be left in a bad state when stop() is called
-                        # after runAndWait() has already completed. This was the
-                        # reason the first response worked and later responses
-                        # became silent.
-                        if interrupted or failed:
-                            try:
-                                engine.stop()
-                            except Exception:
-                                pass
-
-                        with self.engine_lock:
-                            self.stop_requested = False
-
-                        self.level.emit(0.0)
-                        self.speaking_finished.emit()
-
-                        if interrupted and not failed:
-                            print("[TTS] Speech interrupted.")
-                            self.speech_interrupted.emit()
-                        elif not failed:
-                            self.response_finished.emit()
+                except Exception as e:
+                    print(f"[TTS ERROR] {e}")
+                    self.error.emit(str(e))
 
                 finally:
-                    self.queue.task_done()
+                    with self.engine_lock:
+                        self.currently_speaking = False
+                        self.current_engine = None
+                        self.stop_requested = False
 
-            print("[TTS] TTS worker stopped.")
+                    try:
+                        if engine is not None:
+                            engine.stop()
+                    except Exception:
+                        pass
+
+                    # Release the SAPI COM object before the next response.
+                    del engine
+                    gc.collect()
+
+                    self.level.emit(0.0)
+                    self.speaking_finished.emit()
+
+                    if interrupted:
+                        print("[TTS] Speech interrupted.")
+                        self.speech_interrupted.emit()
+                    else:
+                        print("[TTS] Speech finished.")
+                        self.response_finished.emit()
 
         except Exception as e:
             print(f"[TTS WORKER ERROR] {e}")
@@ -149,22 +139,8 @@ class TextToSpeech(QObject):
                 self.current_engine = None
                 self.currently_speaking = False
 
-            if engine is not None:
-                try:
-                    engine.stop()
-                except Exception:
-                    pass
-
-            try:
-                pythoncom.CoUninitialize()
-            except Exception:
-                pass
-
+            pythoncom.CoUninitialize()
             print("[TTS] COM uninitialized.")
-
-    # ========================================================
-    # FEED TOKEN
-    # ========================================================
 
     def feed(self, token):
         if not token:
@@ -173,34 +149,27 @@ class TextToSpeech(QObject):
         with self.lock:
             self.buffer += token
 
-    # ========================================================
-    # RESPONSE FINISHED
-    # ========================================================
-
     def finish_response(self):
         with self.lock:
             text = self.buffer.strip()
             self.buffer = ""
 
         if not text:
+            print("[TTS] finish_response called with empty buffer.")
             return
 
         print(f"[TTS] Queueing: {text}")
         self.queue.put(("speak", text))
 
-    # ========================================================
-    # STOP CURRENT SPEECH
-    # ========================================================
-
     def stop_speaking(self):
         with self.lock:
             self.buffer = ""
 
-        # Remove responses that have not started yet.
+        # Remove waiting responses, but do not leave the queue in a broken
+        # state for the next request.
         try:
             while True:
                 self.queue.get_nowait()
-                self.queue.task_done()
         except queue.Empty:
             pass
 
@@ -208,7 +177,7 @@ class TextToSpeech(QObject):
             engine = self.current_engine
             active = self.currently_speaking
 
-            if not active:
+            if not active or engine is None:
                 self.stop_requested = False
                 print("[TTS] No active speech. Pending speech cleared.")
                 return
@@ -217,14 +186,9 @@ class TextToSpeech(QObject):
 
         try:
             engine.stop()
+            print("[TTS] Current speech interrupted.")
         except Exception as e:
             print(f"[TTS] Could not stop engine: {e}")
-
-        print("[TTS] Current speech interrupted / pending speech cleared.")
-
-    # ========================================================
-    # SHUTDOWN
-    # ========================================================
 
     def shutdown(self):
         self.running = False
