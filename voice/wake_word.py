@@ -9,7 +9,7 @@ from PyQt6.QtCore import QThread, pyqtSignal
 
 
 class WakeWordWorker(QThread):
-    """Passive listener for a reliable double-clap or 'Hey Jarvis'."""
+    """Passive listener for a conservative double-clap or 'Hey Jarvis'."""
 
     wake_detected = pyqtSignal(str)
     level = pyqtSignal(float)
@@ -17,7 +17,6 @@ class WakeWordWorker(QThread):
 
     def __init__(self, sample_rate=16000, parent=None):
         super().__init__(parent)
-
         self.sample_rate = sample_rate
 
         # ----------------------------------------------------
@@ -28,26 +27,27 @@ class WakeWordWorker(QThread):
         self.noise_initialized = False
         self.calibration_seconds = 1.5
 
-        # A spoken syllable can have a surprisingly high peak/RMS ratio.
-        # Therefore peak alone must NEVER be enough to call something a clap.
-        self.min_rms = 0.045
-        self.min_peak = 0.45
-        self.rms_multiplier = 5.0
-        self.peak_multiplier = 4.0
-
-        # Claps are short, broadband transients. Voice is much less
-        # broadband. Zero-crossing rate is used as a second discriminator.
-        self.min_zero_crossing_rate = 0.12
-        self.crest_factor = 3.0
+        # IMPORTANT: speech is deliberately excluded from clap detection.
+        # A voice syllable can have a sharp peak, so peak/RMS alone is not
+        # enough to identify a clap.
+        self.min_rms = 0.055
+        self.min_peak = 0.55
+        self.rms_multiplier = 7.0
+        self.peak_multiplier = 5.0
+        self.min_zero_crossing_rate = 0.18
+        self.crest_factor = 4.0
+        self.max_speech_rms = 0.10
 
         self.clap_min_interval = 0.18
-        self.clap_max_interval = 0.65
+        self.clap_max_interval = 0.60
         self.clap_cooldown = 2.0
-        self.clap_expiry = 0.8
+        self.clap_expiry = 0.75
 
         self.speech_check_interval = 1.0
         self.running = True
         self.recognizer = sr.Recognizer()
+        self.recognizer.energy_threshold = 300
+        self.recognizer.dynamic_energy_threshold = False
 
         self._last_clap_time = 0.0
         self._first_clap_time = None
@@ -80,10 +80,8 @@ class WakeWordWorker(QThread):
 
                 while self.running:
                     audio, _ = stream.read(1024)
-                    audio = audio.copy()
-                    audio_buffer.append(audio)
+                    samples = np.squeeze(audio.copy())
 
-                    samples = np.squeeze(audio)
                     rms = float(np.sqrt(np.mean(np.square(samples))))
                     peak = float(np.max(np.abs(samples)))
                     zcr = self._zero_crossing_rate(samples)
@@ -91,6 +89,7 @@ class WakeWordWorker(QThread):
                     self._update_noise_floor(rms, peak)
                     self.level.emit(min(1.0, rms * 5.0))
 
+                    # Do not let speech create clap candidates.
                     if self._is_clap(rms, peak, zcr):
                         self._register_clap()
 
@@ -102,14 +101,16 @@ class WakeWordWorker(QThread):
                         self.wake_detected.emit("clap")
                         return
 
+                    # Speech recognition is independent of clap detection.
+                    # Keep enough audio to recognize the complete phrase.
+                    audio_buffer.append(audio.copy())
                     now = time.time()
+
                     if now - last_speech_check >= self.speech_check_interval:
                         last_speech_check = now
 
                         if audio_buffer:
-                            audio = np.squeeze(
-                                np.concatenate(audio_buffer, axis=0)
-                            )
+                            audio = np.squeeze(np.concatenate(audio_buffer, axis=0))
                             audio_buffer.clear()
 
                             speech = self._recognize_audio(audio)
@@ -129,7 +130,7 @@ class WakeWordWorker(QThread):
         print("[WAKE] Wake listener stopped.")
 
     def _calibrate(self, stream):
-        """Measure the room/microphone floor before accepting any claps."""
+        """Measure the room/microphone floor before accepting claps."""
         print("[WAKE] Calibrating microphone noise floor for 1.5s...")
 
         samples = []
@@ -147,19 +148,20 @@ class WakeWordWorker(QThread):
 
         rms_values = np.array([x[0] for x in samples])
         peak_values = np.array([x[1] for x in samples])
-
-        # 80th percentile avoids letting one transient define the floor.
         self.noise_rms = float(np.percentile(rms_values, 80))
         self.noise_peak = float(np.percentile(peak_values, 80))
         self.noise_initialized = True
 
     def _update_noise_floor(self, rms, peak):
-        """Slowly track quiet background noise, never loud transients."""
         if not self.noise_initialized:
             return
 
-        quiet_rms_limit = max(self.min_rms * 0.7, self.noise_rms * 1.8)
-        if rms < quiet_rms_limit:
+        quiet_rms_limit = max(self.min_rms * 0.6, self.noise_rms * 1.5)
+        quiet_peak_limit = max(self.min_peak * 0.30, self.noise_peak * 1.5)
+
+        # Only track genuinely quiet audio. A voice/clap cannot raise the
+        # baseline and make later wake events harder to detect.
+        if rms < quiet_rms_limit and peak < quiet_peak_limit:
             alpha = 0.01
             self.noise_rms = (1 - alpha) * self.noise_rms + alpha * rms
             self.noise_peak = (1 - alpha) * self.noise_peak + alpha * peak
@@ -168,7 +170,6 @@ class WakeWordWorker(QThread):
     def _zero_crossing_rate(samples):
         if len(samples) < 2:
             return 0.0
-
         signs = samples >= 0
         return float(np.mean(signs[1:] != signs[:-1]))
 
@@ -176,17 +177,14 @@ class WakeWordWorker(QThread):
         if not self.noise_initialized:
             return False
 
-        rms_threshold = max(
-            self.min_rms,
-            self.noise_rms * self.rms_multiplier,
-        )
-        peak_threshold = max(
-            self.min_peak,
-            self.noise_peak * self.peak_multiplier,
-        )
+        # The most important false-positive guard: normal speech is not a
+        # clap candidate, even when a consonant creates a sharp peak.
+        if rms > self.max_speech_rms:
+            return False
 
-        # All conditions are required. This is intentionally conservative:
-        # false wake-ups are much worse than requiring a slightly louder clap.
+        rms_threshold = max(self.min_rms, self.noise_rms * self.rms_multiplier)
+        peak_threshold = max(self.min_peak, self.noise_peak * self.peak_multiplier)
+
         return (
             rms >= rms_threshold
             and peak >= peak_threshold
@@ -232,18 +230,18 @@ class WakeWordWorker(QThread):
             interval = self._last_clap_time - self._first_clap_time
             return (
                 self._last_clap_time > self._first_clap_time
-                and interval <= self.clap_max_interval
+                and self.clap_min_interval <= interval <= self.clap_max_interval
             )
 
     @staticmethod
     def _is_wake_phrase(text):
-        # Keep this deliberately strict. We want "Hey Jarvis", not generic
-        # speech containing a vaguely similar word.
+        # Strict phrase matching. 'Hey Jaggu', 'Hey Jarvis something', etc.
+        # are not accepted unless the transcription genuinely starts with
+        # the two words 'hey jarvis'.
         normalized = " ".join(text.lower().strip().split())
-        normalized = normalized.replace(",", "")
-        normalized = normalized.replace(".", "")
-
-        return normalized == "hey jarvis" or normalized.startswith("hey jarvis ")
+        normalized = normalized.replace(",", "").replace(".", "")
+        words = normalized.split()
+        return len(words) >= 2 and words[0] == "hey" and words[1] == "jarvis"
 
     def _recognize_audio(self, audio):
         if audio is None or len(audio) == 0:
@@ -251,12 +249,7 @@ class WakeWordWorker(QThread):
 
         audio = np.clip(audio, -1.0, 1.0)
         pcm = (audio * 32767).astype(np.int16)
-
-        audio_data = sr.AudioData(
-            pcm.tobytes(),
-            self.sample_rate,
-            2,
-        )
+        audio_data = sr.AudioData(pcm.tobytes(), self.sample_rate, 2)
 
         try:
             return self.recognizer.recognize_google(audio_data).strip()
