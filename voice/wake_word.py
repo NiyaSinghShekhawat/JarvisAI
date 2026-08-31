@@ -20,26 +20,32 @@ class WakeWordWorker(QThread):
 
         self.sample_rate = sample_rate
 
-        # Clap detection is adaptive. These are intentionally much stricter
-        # than the old fixed 0.005 / 0.20 thresholds, which treated normal
-        # microphone noise as a clap.
+        # ----------------------------------------------------
+        # ADAPTIVE NOISE FLOOR
+        # ----------------------------------------------------
         self.noise_rms = 0.0
         self.noise_peak = 0.0
         self.noise_initialized = False
         self.calibration_seconds = 1.5
 
-        self.min_rms = 0.025
-        self.min_peak = 0.35
-        self.rms_multiplier = 3.0
-        self.peak_multiplier = 2.5
-        self.crest_factor = 2.2
+        # A spoken syllable can have a surprisingly high peak/RMS ratio.
+        # Therefore peak alone must NEVER be enough to call something a clap.
+        self.min_rms = 0.045
+        self.min_peak = 0.45
+        self.rms_multiplier = 5.0
+        self.peak_multiplier = 4.0
 
-        self.clap_min_interval = 0.16
+        # Claps are short, broadband transients. Voice is much less
+        # broadband. Zero-crossing rate is used as a second discriminator.
+        self.min_zero_crossing_rate = 0.12
+        self.crest_factor = 3.0
+
+        self.clap_min_interval = 0.18
         self.clap_max_interval = 0.65
         self.clap_cooldown = 2.0
         self.clap_expiry = 0.8
 
-        self.speech_check_interval = 1.2
+        self.speech_check_interval = 1.0
         self.running = True
         self.recognizer = sr.Recognizer()
 
@@ -77,12 +83,15 @@ class WakeWordWorker(QThread):
                     audio = audio.copy()
                     audio_buffer.append(audio)
 
-                    rms = float(np.sqrt(np.mean(np.square(audio))))
-                    peak = float(np.max(np.abs(audio)))
+                    samples = np.squeeze(audio)
+                    rms = float(np.sqrt(np.mean(np.square(samples))))
+                    peak = float(np.max(np.abs(samples)))
+                    zcr = self._zero_crossing_rate(samples)
+
                     self._update_noise_floor(rms, peak)
                     self.level.emit(min(1.0, rms * 5.0))
 
-                    if self._is_clap(rms, peak):
+                    if self._is_clap(rms, peak, zcr):
                         self._register_clap()
 
                     if self._double_clap_ready():
@@ -139,24 +148,31 @@ class WakeWordWorker(QThread):
         rms_values = np.array([x[0] for x in samples])
         peak_values = np.array([x[1] for x in samples])
 
-        # Use a high percentile so occasional background bursts don't become
-        # the new baseline, while still adapting to a noisy room.
+        # 80th percentile avoids letting one transient define the floor.
         self.noise_rms = float(np.percentile(rms_values, 80))
         self.noise_peak = float(np.percentile(peak_values, 80))
         self.noise_initialized = True
 
     def _update_noise_floor(self, rms, peak):
-        """Slowly track quiet background noise, never loud transient claps."""
+        """Slowly track quiet background noise, never loud transients."""
         if not self.noise_initialized:
             return
 
-        quiet_rms_limit = max(self.min_rms, self.noise_rms * 1.8)
+        quiet_rms_limit = max(self.min_rms * 0.7, self.noise_rms * 1.8)
         if rms < quiet_rms_limit:
-            alpha = 0.015
+            alpha = 0.01
             self.noise_rms = (1 - alpha) * self.noise_rms + alpha * rms
             self.noise_peak = (1 - alpha) * self.noise_peak + alpha * peak
 
-    def _is_clap(self, rms, peak):
+    @staticmethod
+    def _zero_crossing_rate(samples):
+        if len(samples) < 2:
+            return 0.0
+
+        signs = samples >= 0
+        return float(np.mean(signs[1:] != signs[:-1]))
+
+    def _is_clap(self, rms, peak, zcr):
         if not self.noise_initialized:
             return False
 
@@ -169,11 +185,12 @@ class WakeWordWorker(QThread):
             self.noise_peak * self.peak_multiplier,
         )
 
-        # Claps are impulsive: peak should be substantially above average
-        # energy in the block. This rejects steady fan/AC/keyboard noise.
+        # All conditions are required. This is intentionally conservative:
+        # false wake-ups are much worse than requiring a slightly louder clap.
         return (
             rms >= rms_threshold
             and peak >= peak_threshold
+            and zcr >= self.min_zero_crossing_rate
             and peak >= rms * self.crest_factor
         )
 
@@ -187,7 +204,6 @@ class WakeWordWorker(QThread):
             if now - self._last_trigger_time < self.clap_cooldown:
                 return
 
-            # Expire an old first clap before accepting a new pair.
             if (
                 self._first_clap_time is not None
                 and now - self._first_clap_time > self.clap_expiry
@@ -221,16 +237,13 @@ class WakeWordWorker(QThread):
 
     @staticmethod
     def _is_wake_phrase(text):
+        # Keep this deliberately strict. We want "Hey Jarvis", not generic
+        # speech containing a vaguely similar word.
         normalized = " ".join(text.lower().strip().split())
         normalized = normalized.replace(",", "")
+        normalized = normalized.replace(".", "")
 
-        variants = (
-            "hey jarvis",
-            "hey, jarvis",
-            "a jarvis",
-            "hey jarvis.",
-        )
-        return any(phrase in normalized for phrase in variants)
+        return normalized == "hey jarvis" or normalized.startswith("hey jarvis ")
 
     def _recognize_audio(self, audio):
         if audio is None or len(audio) == 0:
@@ -300,11 +313,10 @@ class StopWordWorker(QThread):
                             print("[STOP] 'Jarvis stop' detected.")
                             self.stop_detected.emit()
                             return
+
         except Exception as e:
             print(f"[STOP ERROR] {e}")
             self.error.emit(str(e))
-
-        print("[STOP] Stop-word listener stopped.")
 
     def _recognize_audio(self, audio):
         if audio is None or len(audio) == 0:
