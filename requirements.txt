@@ -14,3 +14,4 @@ faster-whisper
 pyttsx3
 scipy
 openwakeword
+yt-dlp
