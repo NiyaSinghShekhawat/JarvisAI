@@ -1,10 +1,11 @@
-"""Backward-compatible wake imports.
+"""Compatibility facade for the unified wake subsystem.
 
-The implementation now lives in voice.wake. Existing Jarvis imports continue
-working without changing the rest of the application.
+Application code should prefer ``from voice.wake import WakeListener`` and
+``from voice.wake import StopWordWorker``. This module remains temporarily so
+older imports cannot accidentally instantiate a second wake implementation.
 """
-from voice.wake.listener import WakeListener
-from voice.wake.stop_word_detector import StopWordWorker
+
+from voice.wake import StopWordWorker, WakeListener
 
 WakeWordWorker = WakeListener
 
