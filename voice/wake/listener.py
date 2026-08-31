@@ -2,8 +2,10 @@ import time
 
 import numpy as np
 import sounddevice as sd
+from scipy.signal import resample_poly
 from PyQt6.QtCore import QThread, pyqtSignal
 
+from voice.audio_config import MIC_CHANNELS, MIC_DEVICE, MIC_SAMPLE_RATE, WAKE_SAMPLE_RATE
 from .clap_detector import ClapDetector
 from .wake_word_detector import LocalWakeWordDetector
 
@@ -15,28 +17,30 @@ class WakeListener(QThread):
     level = pyqtSignal(float)
     error = pyqtSignal(str)
 
-    def __init__(self, sample_rate=16000, parent=None):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.sample_rate = sample_rate
+        self.sample_rate = MIC_SAMPLE_RATE
         self.running = True
-        self.clap = ClapDetector(sample_rate)
+        self.clap = ClapDetector(MIC_SAMPLE_RATE)
         self.wake_word = LocalWakeWordDetector()
 
     def run(self):
         print("[WAKE] Local wake listener started.")
+        print(f"[WAKE] Microphone device: {MIC_DEVICE} @ {MIC_SAMPLE_RATE} Hz")
 
         try:
             with sd.InputStream(
-                samplerate=self.sample_rate,
-                channels=1,
+                device=MIC_DEVICE,
+                samplerate=MIC_SAMPLE_RATE,
+                channels=MIC_CHANNELS,
                 dtype="float32",
-                blocksize=1280,  # 80 ms @ 16 kHz; native openWakeWord frame
+                blocksize=3840,  # 80 ms @ 48 kHz -> 1280 samples @ 16 kHz
             ) as stream:
                 self._calibrate(stream)
                 print("[WAKE] Listening locally for double clap or 'Hey Jarvis'.")
 
                 while self.running:
-                    audio, _ = stream.read(1280)
+                    audio, _ = stream.read(3840)
                     samples = np.squeeze(audio.copy())
 
                     if samples.size == 0:
@@ -50,8 +54,18 @@ class WakeListener(QThread):
                         self.wake_detected.emit("clap")
                         return
 
+                    # Capture is 48 kHz because that is the microphone's native
+                    # WASAPI rate. openWakeWord expects 16 kHz, so resample
+                    # exactly one 80 ms frame before inference.
+                    wake_samples = resample_poly(
+                        samples,
+                        WAKE_SAMPLE_RATE,
+                        MIC_SAMPLE_RATE,
+                    )
+                    wake_samples = np.asarray(wake_samples, dtype=np.float32)
+
                     if self.wake_word.process(
-                        (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
+                        (np.clip(wake_samples, -1.0, 1.0) * 32767).astype(np.int16)
                     ):
                         self.wake_detected.emit("voice")
                         return
@@ -68,7 +82,7 @@ class WakeListener(QThread):
         deadline = time.monotonic() + 1.5
 
         while self.running and time.monotonic() < deadline:
-            audio, _ = stream.read(1280)
+            audio, _ = stream.read(3840)
             chunks.append(np.squeeze(audio.copy()))
 
         if chunks:
