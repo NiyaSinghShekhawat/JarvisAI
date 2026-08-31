@@ -4,246 +4,113 @@ from typing import Callable, Optional
 import numpy as np
 import sounddevice as sd
 import speech_recognition as sr
+from scipy.signal import resample_poly
+
+from voice.audio_config import MIC_CHANNELS, MIC_DEVICE, MIC_SAMPLE_RATE, WAKE_SAMPLE_RATE
 
 
 class SpeechToText:
-    """
-    Microphone capture + speech recognition.
-
-    Pipeline:
-
-        Microphone
-            ↓
-        sounddevice
-            ↓
-        Voice activity detection
-            ↓
-        Google Speech Recognition
-            ↓
-        Text transcript
-    """
+    """Microphone capture + speech recognition using Jarvis's shared mic."""
 
     def __init__(
         self,
-        sample_rate: int = 16000,
-        channels: int = 1,
+        sample_rate: int = MIC_SAMPLE_RATE,
+        channels: int = MIC_CHANNELS,
         silence_threshold: float = 0.015,
         silence_duration: float = 0.8,
         max_duration: float = 15.0,
     ):
         self.sample_rate = sample_rate
         self.channels = channels
-
         self.silence_threshold = silence_threshold
         self.silence_duration = silence_duration
         self.max_duration = max_duration
-
         self.recognizer = sr.Recognizer()
-
-    # ========================================================
-    # RECORD UNTIL SILENCE
-    # ========================================================
 
     def record_until_silence(
         self,
-        level_callback: Optional[
-            Callable[[float], None]
-        ] = None,
+        level_callback: Optional[Callable[[float], None]] = None,
     ):
-        """
-        Record until the user stops speaking.
-
-        The microphone remains active until:
-        - the user speaks and then becomes silent
-        - OR max_duration is reached.
-        """
-
         frames: list[np.ndarray] = []
-
-        # These variables MUST be inside this method.
         silence_start: Optional[float] = None
-        has_spoken: bool = False
-        start_time: float = time.time()
+        has_spoken = False
+        start_time = time.time()
 
-        # ====================================================
-        # MICROPHONE CALLBACK
-        # ====================================================
-
-        def callback(
-            indata: np.ndarray,
-            frame_count: int,
-            time_info,
-            status,
-        ) -> None:
-
-            nonlocal silence_start
-            nonlocal has_spoken
+        def callback(indata, frame_count, time_info, status):
+            nonlocal silence_start, has_spoken
 
             if status:
-                print(
-                    f"[Microphone] {status}"
-                )
+                print(f"[Microphone] {status}")
 
-            # Copy current microphone frame
             audio = indata.copy()
-
             frames.append(audio)
 
-            # =================================================
-            # RMS AMPLITUDE
-            # =================================================
+            rms = float(np.sqrt(np.mean(np.square(audio))))
+            level = min(1.0, rms * 8.0)
 
-            rms: float = float(
-                np.sqrt(
-                    np.mean(
-                        np.square(audio)
-                    )
-                )
-            )
-
-            # Convert microphone level to approximately 0-1
-            level: float = min(
-                1.0,
-                rms * 8.0
-            )
-
-            # Send level to UI
             if level_callback:
                 level_callback(level)
 
-            # =================================================
-            # SPEECH DETECTION
-            # =================================================
-
             if rms >= self.silence_threshold:
-
-                # User is speaking
                 has_spoken = True
-
-                # Reset silence timer
                 silence_start = None
+            elif has_spoken and silence_start is None:
+                silence_start = time.time()
 
-            else:
-
-                # Only detect ending silence after
-                # the user has actually spoken.
-                if has_spoken:
-
-                    if silence_start is None:
-                        silence_start = time.time()
-
-        # ====================================================
-        # OPEN MICROPHONE
-        # ====================================================
+        print(
+            f"[STT] Opening microphone device {MIC_DEVICE} "
+            f"@ {self.sample_rate} Hz"
+        )
 
         with sd.InputStream(
+            device=MIC_DEVICE,
             samplerate=self.sample_rate,
             channels=self.channels,
             dtype="float32",
             callback=callback,
         ):
-
             while True:
-
-                elapsed: float = (
-                    time.time() - start_time
-                )
-
-                # ------------------------------------------------
-                # Maximum recording duration
-                # ------------------------------------------------
+                elapsed = time.time() - start_time
 
                 if elapsed >= self.max_duration:
                     break
 
-                # ------------------------------------------------
-                # User stopped speaking
-                # ------------------------------------------------
-
                 if (
                     has_spoken
-                    and
-                    silence_start is not None
-                    and
-                    (
-                        time.time()
-                        - silence_start
-                    ) >= self.silence_duration
+                    and silence_start is not None
+                    and (time.time() - silence_start) >= self.silence_duration
                 ):
                     break
 
                 time.sleep(0.05)
 
-        # ====================================================
-        # NO SPEECH DETECTED
-        # ====================================================
-
         if not frames or not has_spoken:
             return None
 
-        # ====================================================
-        # JOIN AUDIO
-        # ====================================================
+        audio = np.squeeze(np.concatenate(frames, axis=0))
+        audio = np.clip(audio, -1.0, 1.0)
 
-        audio = np.concatenate(
-            frames,
-            axis=0
-        )
-
-        audio = np.squeeze(audio)
-
-        # ====================================================
-        # FLOAT32 → PCM16
-        # ====================================================
-
-        audio = np.clip(
-            audio,
-            -1.0,
-            1.0
-        )
-
-        audio_int16 = (
-            audio * 32767
-        ).astype(np.int16)
+        # SpeechRecognition's AudioData below is configured for 16 kHz.
+        # Capture at the microphone's native 48 kHz, then resample once here.
+        audio_16k = resample_poly(audio, WAKE_SAMPLE_RATE, MIC_SAMPLE_RATE)
+        audio_int16 = (np.clip(audio_16k, -1.0, 1.0) * 32767).astype(np.int16)
 
         return audio_int16.tobytes()
 
-    # ========================================================
-    # TRANSCRIBE
-    # ========================================================
-
-    def transcribe(
-        self,
-        audio_bytes,
-    ) -> str:
-
+    def transcribe(self, audio_bytes) -> str:
         if not audio_bytes:
             return ""
 
         audio_data = sr.AudioData(
             audio_bytes,
-            self.sample_rate,
+            WAKE_SAMPLE_RATE,
             2,
         )
 
         try:
-
-            text = (
-                self.recognizer
-                .recognize_google(
-                    audio_data
-                )
-            )
-
+            text = self.recognizer.recognize_google(audio_data)
             return text.strip()
-
         except sr.UnknownValueError:
-
             return ""
-
         except sr.RequestError as e:
-
-            raise RuntimeError(
-                "Speech recognition service "
-                f"unavailable: {e}"
-            )
+            raise RuntimeError(f"Speech recognition service unavailable: {e}")
