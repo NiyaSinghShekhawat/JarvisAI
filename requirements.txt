@@ -3,13 +3,14 @@ python-dotenv
 requests
 pytz
 google-api-python-client
-google-auth-httplib2 
+google-auth-httplib2
 google-auth-oauthlib
 google-auth
 PyQt6
 sounddevice
 SpeechRecognition
 numpy
-faster-whisper 
+faster-whisper
 pyttsx3
 scipy
+openwakeword
