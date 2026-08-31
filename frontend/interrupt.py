@@ -130,6 +130,7 @@ _original_handle_response = JarvisWindow.handle_response
 _original_handle_error = JarvisWindow.handle_error
 _original_tts_response_finished = JarvisWindow.tts_response_finished
 _original_show_orb_mode = JarvisWindow.show_orb_mode
+_original_handle_wake = JarvisWindow.handle_wake
 
 
 def _patched_window_init(self):
@@ -178,8 +179,6 @@ def _patched_start_worker(self, message):
 
 
 def _patched_add_response_token(self, token):
-    # Jarvis may finish generating the current answer after the user says
-    # "Jarvis stop". Never feed those late tokens back into TTS/UI.
     if self.response_cancelled:
         return
 
@@ -223,8 +222,6 @@ def _handle_stop_command(self):
 
 
 def _patched_tts_response_finished(self):
-    # Stop command listening before the original handler can restart
-    # passive wake listening in orb mode.
     self._stop_stop_listener()
     _original_tts_response_finished(self)
 
@@ -232,7 +229,6 @@ def _patched_tts_response_finished(self):
 def _patched_show_orb_mode(self):
     _original_show_orb_mode(self)
 
-    # The orb is now 210x210 instead of the old 150x150.
     self.setMaximumSize(230, 230)
     self.resize(230, 230)
 
@@ -255,10 +251,50 @@ def _patched_handle_error(self, error):
     _original_handle_error(self, error)
 
 
+def _patched_handle_wake(self, wake_type):
+    """Every wake trigger opens the main Jarvis interface fullscreen."""
+    print(f"[JARVIS] Wake event: {wake_type} -> FULLSCREEN")
+    self.stop_wake_listener()
+    self.show_fullscreen_mode()
+    self.activate_voice()
+
+
+def _show_fullscreen_mode(self):
+    """Restore the full UI and occupy the available screen."""
+    self.jarvis_mode = "full"
+
+    if self.orb_container is not None:
+        self.orb_container.hide()
+        self.orb.setParent(self.full_central)
+        self.orb_container.deleteLater()
+        self.orb_container = None
+
+    self.setCentralWidget(self.full_central)
+    self.full_central.show()
+
+    self.status.show()
+    self.interpreted_label.hide()
+    self.response_label.hide()
+    self.input.show()
+
+    self.setMinimumSize(0, 0)
+    self.setMaximumSize(16777215, 16777215)
+    self.setWindowFlags(Qt.WindowType.Window)
+    self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+    self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
+    self.showFullScreen()
+    self.raise_()
+    self.activateWindow()
+
+    print("[JARVIS] Fullscreen interface active.")
+
+
 JarvisWindow.__init__ = _patched_window_init
 JarvisWindow.start_worker = _patched_start_worker
 JarvisWindow.add_response_token = _patched_add_response_token
 JarvisWindow.handle_response = _patched_handle_response
+JarvisWindow.handle_wake = _patched_handle_wake
+JarvisWindow.show_fullscreen_mode = _show_fullscreen_mode
 JarvisWindow.handle_stop_command = _handle_stop_command
 JarvisWindow._start_stop_listener = _start_stop_listener
 JarvisWindow._stop_stop_listener = _stop_stop_listener
