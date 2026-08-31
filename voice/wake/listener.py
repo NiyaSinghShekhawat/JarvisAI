@@ -1,5 +1,5 @@
 import time
-import threading
+
 import numpy as np
 import sounddevice as sd
 from PyQt6.QtCore import QThread, pyqtSignal
@@ -21,23 +21,27 @@ class WakeListener(QThread):
         self.running = True
         self.clap = ClapDetector(sample_rate)
         self.wake_word = LocalWakeWordDetector()
-        self._lock = threading.Lock()
 
     def run(self):
         print("[WAKE] Local wake listener started.")
+
         try:
             with sd.InputStream(
                 samplerate=self.sample_rate,
                 channels=1,
                 dtype="float32",
-                blocksize=320,
+                blocksize=1280,  # 80 ms @ 16 kHz; native openWakeWord frame
             ) as stream:
                 self._calibrate(stream)
                 print("[WAKE] Listening locally for double clap or 'Hey Jarvis'.")
 
                 while self.running:
-                    audio, _ = stream.read(320)
+                    audio, _ = stream.read(1280)
                     samples = np.squeeze(audio.copy())
+
+                    if samples.size == 0:
+                        continue
+
                     rms = float(np.sqrt(np.mean(np.square(samples))))
                     self.level.emit(min(1.0, rms * 5.0))
 
@@ -46,7 +50,9 @@ class WakeListener(QThread):
                         self.wake_detected.emit("clap")
                         return
 
-                    if self.wake_word.process(samples):
+                    if self.wake_word.process(
+                        (np.clip(samples, -1.0, 1.0) * 32767).astype(np.int16)
+                    ):
                         self.wake_detected.emit("voice")
                         return
 
@@ -60,9 +66,11 @@ class WakeListener(QThread):
         print("[WAKE] Calibrating microphone noise floor for 1.5s...")
         chunks = []
         deadline = time.monotonic() + 1.5
+
         while self.running and time.monotonic() < deadline:
-            audio, _ = stream.read(320)
+            audio, _ = stream.read(1280)
             chunks.append(np.squeeze(audio.copy()))
+
         if chunks:
             self.clap.calibrate(np.concatenate(chunks))
             print(
