@@ -2,12 +2,16 @@ import importlib.util
 
 
 class LocalWakeWordDetector:
-    """Local ``Hey Jarvis`` detector backed by openWakeWord.
+    """Local wake-word detector backed by openWakeWord.
 
-    This class owns only wake-word inference. Microphone ownership stays in
-    ``voice.wake.listener.WakeListener`` so the application has one passive
-    microphone pipeline.
+    Supports both "Hey Jarvis" and "Wake up Jarvis". Microphone ownership
+    remains in WakeListener so the application keeps one passive audio stream.
     """
+
+    WAKE_WORDS = {
+        "hey_jarvis": "Hey Jarvis",
+        "wake_up_jarvis": "Wake up Jarvis",
+    }
 
     def __init__(self, threshold=0.55):
         self.threshold = threshold
@@ -24,14 +28,14 @@ class LocalWakeWordDetector:
         try:
             from openwakeword.model import Model
 
-            # Load ONLY the Jarvis model. Loading every bundled wake word makes
-            # the result ambiguous and wastes CPU on every microphone frame.
-            self.model = Model(wakeword_models=["hey_jarvis"])
+            # Load only the two Jarvis wake-word models.
+            self.model = Model(wakeword_models=list(self.WAKE_WORDS.keys()))
             self.enabled = True
 
             print("[WAKE] Local wake-word engine loaded.")
             print(f"[WAKE] Models: {list(self.model.models.keys())}")
             print(f"[WAKE] Threshold: {self.threshold:.2f}")
+            print("[WAKE] Phrases: 'Hey Jarvis' / 'Wake up Jarvis'")
 
         except Exception as exc:
             print(f"[WAKE] Local wake-word engine unavailable: {exc}")
@@ -50,15 +54,15 @@ class LocalWakeWordDetector:
 
             scores = self.model.predict(
                 samples,
-                threshold={"hey_jarvis": self.threshold},
+                threshold={name: self.threshold for name in self.WAKE_WORDS},
                 debounce_time=1.0,
             )
 
-            score = float(scores.get("hey_jarvis", 0.0))
-
-            if score >= self.threshold:
-                print(f"[WAKE] 'Hey Jarvis' detected ({score:.2f})")
-                return True
+            for model_name, phrase in self.WAKE_WORDS.items():
+                score = float(scores.get(model_name, 0.0))
+                if score >= self.threshold:
+                    print(f"[WAKE] '{phrase}' detected ({score:.2f})")
+                    return True
 
         except Exception as exc:
             if not self._warned:
