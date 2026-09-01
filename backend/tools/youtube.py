@@ -1,5 +1,8 @@
-import webbrowser
 from urllib.parse import quote_plus
+
+import webbrowser
+
+from backend.tools.browser import open_in_browser
 
 
 def youtube_search(query: str):
@@ -9,18 +12,18 @@ def youtube_search(query: str):
         + quote_plus(query)
     )
 
-    webbrowser.open(url)
+    opened = open_in_browser(url)
 
     return {
         "success": True,
         "query": query,
-        "url": url,
         "opened": "search_results",
+        "browser_opened": opened,
     }
 
 
 def youtube_play(query: str):
-    """Find the first YouTube result and open the actual video."""
+    """Find the first YouTube result and open the actual video directly."""
     try:
         import yt_dlp
     except ImportError as exc:
@@ -50,7 +53,12 @@ def youtube_play(query: str):
         }
 
     video = entries[0]
-    video_url = video.get("webpage_url") or video.get("url")
+    video_url = video.get("webpage_url")
+
+    if not video_url:
+        video_id = video.get("id")
+        if video_id:
+            video_url = f"https://www.youtube.com/watch?v={video_id}"
 
     if not video_url:
         return {
@@ -59,12 +67,16 @@ def youtube_play(query: str):
             "error": "YouTube returned a result without a playable URL.",
         }
 
-    webbrowser.open(video_url)
+    opened = open_in_browser(video_url)
+
+    print(
+        f"[YOUTUBE] Opening '{video.get('title', query)}' in browser: {opened}"
+    )
 
     return {
         "success": True,
         "query": query,
         "title": video.get("title", ""),
-        "url": video_url,
         "opened": "video",
+        "browser_opened": opened,
     }
