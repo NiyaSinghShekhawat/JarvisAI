@@ -21,19 +21,11 @@ DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 
 
 def _run_oauth_flow():
-    """Run Google OAuth and persist a token containing Gmail + Drive scopes."""
     if not CREDENTIALS_FILE.exists():
-        raise FileNotFoundError(
-            "credentials.json not found in the Jarvis project root."
-        )
+        raise FileNotFoundError("credentials.json not found in the Jarvis project root.")
 
     print("[DRIVE] Starting Google OAuth authorization for Drive...")
-
-    flow = InstalledAppFlow.from_client_secrets_file(
-        str(CREDENTIALS_FILE),
-        SCOPES,
-    )
-
+    flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), SCOPES)
     creds = flow.run_local_server(port=0)
     TOKEN_FILE.write_text(creds.to_json(), encoding="utf-8")
     print(f"[DRIVE] Authentication saved to {TOKEN_FILE.name}.")
@@ -41,15 +33,11 @@ def _run_oauth_flow():
 
 
 def get_drive_service():
-    """Authenticate with Google and return a read-only Drive service."""
     creds = None
 
     if TOKEN_FILE.exists():
         try:
-            creds = Credentials.from_authorized_user_file(
-                str(TOKEN_FILE),
-                SCOPES,
-            )
+            creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
             print("[DRIVE] Loaded saved Google credentials.")
         except (ValueError, OSError) as exc:
             print(f"[DRIVE] Saved token could not be loaded: {exc}")
@@ -65,15 +53,14 @@ def get_drive_service():
             creds = None
 
     granted_scopes = set(creds.scopes or []) if creds else set()
-
     if not creds or not creds.valid or DRIVE_SCOPE not in granted_scopes:
         creds = _run_oauth_flow()
 
     return build("drive", "v3", credentials=creds)
 
 
-def search_drive_files(query: str, limit: int = 10):
-    """Search Google Drive by file/folder name or full text."""
+def search_drive_files(query: str, limit: int = 10, open_first: bool = False):
+    """Search Drive and optionally open the best matching file."""
     service = get_drive_service()
 
     safe_query = query.replace("'", "\\'")
@@ -91,29 +78,58 @@ def search_drive_files(query: str, limit: int = 10):
     ).execute()
 
     files = result.get("files", [])
+    opened = False
+    opened_file = None
+
+    if open_first and files:
+        opened_file = files[0]
+        url = opened_file.get("webViewLink") or f"https://drive.google.com/open?id={opened_file['id']}"
+        opened = open_in_browser(url)
+        print(f"[DRIVE] Opening '{opened_file.get('name', 'file')}' in browser: {opened}")
 
     return {
         "success": True,
         "query": query,
         "files": files,
+        "opened": opened,
+        "opened_file": opened_file,
     }
 
 
-def open_drive_file(file_id: str):
-    """Open a specific Google Drive file in Chrome/default browser."""
+def open_drive_file(file_id: str = "", query: str = ""):
+    """Open a Drive file by ID, or search by query and open the first match."""
     service = get_drive_service()
 
-    file = service.files().get(
-        fileId=file_id,
-        fields="id,name,mimeType,webViewLink",
-    ).execute()
+    if not file_id:
+        if not query:
+            return {"success": False, "error": "Provide a file_id or search query."}
+
+        safe_query = query.replace("'", "\\'")
+        drive_query = (
+            "trashed = false and "
+            f"(name contains '{safe_query}' or fullText contains '{safe_query}')"
+        )
+        result = service.files().list(
+            q=drive_query,
+            pageSize=1,
+            orderBy="modifiedTime desc",
+            spaces="drive",
+            fields="files(id,name,mimeType,webViewLink)",
+        ).execute()
+        files = result.get("files", [])
+        if not files:
+            return {"success": False, "error": f"No Drive file found for '{query}'."}
+        file = files[0]
+        file_id = file["id"]
+    else:
+        file = service.files().get(
+            fileId=file_id,
+            fields="id,name,mimeType,webViewLink",
+        ).execute()
 
     url = file.get("webViewLink") or f"https://drive.google.com/open?id={file_id}"
     opened = open_in_browser(url)
-
-    print(
-        f"[DRIVE] Opening '{file.get('name', 'file')}' in browser: {opened}"
-    )
+    print(f"[DRIVE] Opening '{file.get('name', 'file')}' in browser: {opened}")
 
     return {
         "success": True,
