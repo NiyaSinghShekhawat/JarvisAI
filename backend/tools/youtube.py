@@ -17,38 +17,60 @@ def youtube_search(query: str):
 
 
 def youtube_play(query: str):
-    """Find the first YouTube result and open the actual video directly."""
+    """Open a YouTube video directly, without downloading media."""
     try:
         import yt_dlp
-    except ImportError as exc:
+    except ImportError:
         return {
             "success": False,
             "query": query,
-            "error": "yt-dlp is required for direct YouTube playback. Run: pip install yt-dlp",
+            "error": "yt-dlp is not installed.",
         }
 
+    # Keep the resolver fast and non-interactive. If YouTube blocks the
+    # extractor, fall back to the YouTube search page rather than hanging
+    # Jarvis or returning an empty response.
     options = {
         "quiet": True,
         "no_warnings": True,
         "extract_flat": True,
         "skip_download": True,
         "noplaylist": True,
+        "socket_timeout": 8,
+        "retries": 1,
+        "extractor_retries": 1,
     }
 
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
             result = ydl.extract_info(f"ytsearch1:{query}", download=False)
     except Exception as exc:
-        print(f"[YOUTUBE] Search failed: {exc}")
+        print(f"[YOUTUBE] Direct video lookup failed: {exc}")
+        search_url = "https://www.youtube.com/results?search_query=" + quote_plus(query)
+        opened = open_in_browser(search_url)
         return {
-            "success": False,
+            "success": opened,
             "query": query,
-            "error": f"Could not resolve a YouTube video: {exc}",
+            "title": None,
+            "opened": "search_results" if opened else None,
+            "browser_opened": opened,
+            "fallback": True,
+            "error": None if opened else "Could not open YouTube search results.",
         }
 
     entries = result.get("entries") or []
     if not entries:
-        return {"success": False, "query": query, "error": "No YouTube video found."}
+        search_url = "https://www.youtube.com/results?search_query=" + quote_plus(query)
+        opened = open_in_browser(search_url)
+        return {
+            "success": opened,
+            "query": query,
+            "title": None,
+            "opened": "search_results" if opened else None,
+            "browser_opened": opened,
+            "fallback": True,
+            "error": None if opened else "No YouTube result was found.",
+        }
 
     video = entries[0]
     video_id = video.get("id")
@@ -60,7 +82,7 @@ def youtube_play(query: str):
         return {
             "success": False,
             "query": query,
-            "error": "YouTube returned a result without a playable URL.",
+            "error": "YouTube returned a result without a video ID.",
         }
 
     opened = open_in_browser(video_url)
