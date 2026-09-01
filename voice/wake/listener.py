@@ -13,6 +13,7 @@ from .wake_word_detector import LocalWakeWordDetector
 
 
 WAKE_PHRASES = (
+    "hey jarvis",
     "wake up jarvis",
     "wake up, jarvis",
     "wake jarvis",
@@ -35,66 +36,103 @@ class WakeListener(QThread):
         self.recognizer = sr.Recognizer()
         self._last_phrase_check = 0.0
         self._stt_error_logged = False
+        self._stream_retries = 0
 
     def run(self):
         print("[WAKE] Local wake listener started.")
         print(f"[WAKE] Microphone device: {MIC_DEVICE} @ {MIC_SAMPLE_RATE} Hz")
         print("[WAKE] Wake phrases: 'Hey Jarvis' / 'Wake up Jarvis' / double clap")
 
-        try:
-            with sd.InputStream(
-                device=MIC_DEVICE,
-                samplerate=MIC_SAMPLE_RATE,
-                channels=MIC_CHANNELS,
-                dtype="float32",
-                blocksize=3840,  # 80 ms @ 48 kHz -> 1280 samples @ 16 kHz
-            ) as stream:
-                self._calibrate(stream)
-                print("[WAKE] Listening locally for wake triggers.")
+        while self.running:
+            try:
+                self._listen_session()
+                # A normal return means stop() was requested or a wake was found.
+                if self.running:
+                    self._recover_stream("wake listener session ended unexpectedly")
+            except (sd.PortAudioError, OSError) as exc:
+                if not self.running:
+                    break
+                print(f"[WAKE] Microphone stream error: {exc}")
+                if not self._recover_stream(str(exc)):
+                    self.error.emit(str(exc))
+                    break
+            except Exception as exc:
+                if not self.running:
+                    break
+                print(f"[WAKE ERROR] {exc}")
+                self.error.emit(str(exc))
+                break
 
-                while self.running:
+        print("[WAKE] Local wake listener stopped.")
+
+    def _listen_session(self):
+        """Own the microphone for one session; transient Windows audio errors are recovered by run()."""
+        with sd.InputStream(
+            device=MIC_DEVICE,
+            samplerate=MIC_SAMPLE_RATE,
+            channels=MIC_CHANNELS,
+            dtype="float32",
+            blocksize=3840,  # 80 ms @ 48 kHz -> 1280 samples @ 16 kHz
+        ) as stream:
+            self._stream_retries = 0
+            self._calibrate(stream)
+            print("[WAKE] Listening locally for wake triggers.")
+
+            while self.running:
+                try:
                     audio, _ = stream.read(3840)
-                    samples = np.squeeze(audio.copy())
+                except Exception:
+                    # Let run() classify/recover the underlying Windows/PortAudio error.
+                    raise
 
-                    if samples.size == 0:
-                        continue
+                samples = np.squeeze(audio.copy())
 
-                    rms = float(np.sqrt(np.mean(np.square(samples))))
-                    self.level.emit(min(1.0, rms * 5.0))
+                if samples.size == 0:
+                    continue
 
-                    if self.clap.process(samples):
-                        print("[WAKE] DOUBLE CLAP DETECTED!")
-                        self.wake_detected.emit("clap")
-                        return
+                rms = float(np.sqrt(np.mean(np.square(samples))))
+                self.level.emit(min(1.0, rms * 5.0))
 
-                    wake_samples = resample_poly(
-                        samples,
-                        WAKE_SAMPLE_RATE,
-                        MIC_SAMPLE_RATE,
-                    )
-                    wake_samples = np.asarray(wake_samples, dtype=np.float32)
-                    wake_pcm = (np.clip(wake_samples, -1.0, 1.0) * 32767).astype(np.int16)
+                if self.clap.process(samples):
+                    print("[WAKE] DOUBLE CLAP DETECTED!")
+                    self.wake_detected.emit("clap")
+                    return
 
-                    # Native openWakeWord detector: "Hey Jarvis".
-                    if self.wake_word.process(wake_pcm):
+                wake_samples = resample_poly(
+                    samples,
+                    WAKE_SAMPLE_RATE,
+                    MIC_SAMPLE_RATE,
+                )
+                wake_samples = np.asarray(wake_samples, dtype=np.float32)
+                wake_pcm = (np.clip(wake_samples, -1.0, 1.0) * 32767).astype(np.int16)
+
+                # Native openWakeWord detector: "Hey Jarvis".
+                if self.wake_word.process(wake_pcm):
+                    self.wake_detected.emit("voice")
+                    return
+
+                # Compatibility fallback for "Wake up Jarvis". This only
+                # invokes speech recognition after clear voice activity.
+                if rms >= 0.05 and (time.monotonic() - self._last_phrase_check) >= 1.5:
+                    self._last_phrase_check = time.monotonic()
+                    if self._detect_wake_phrase(stream, wake_pcm):
                         self.wake_detected.emit("voice")
                         return
 
-                    # Compatibility fallback for "Wake up Jarvis". This only
-                    # invokes online speech recognition after a clear voice
-                    # activity spike, so the passive listener does not stream
-                    # continuous audio to the service.
-                    if rms >= 0.05 and (time.monotonic() - self._last_phrase_check) >= 1.5:
-                        self._last_phrase_check = time.monotonic()
-                        if self._detect_wake_phrase(stream, wake_pcm):
-                            self.wake_detected.emit("voice")
-                            return
+    def _recover_stream(self, reason):
+        """Back off and reopen the microphone after a transient Windows audio failure."""
+        self._stream_retries += 1
+        delay = min(3.0, 0.5 * self._stream_retries)
+        print(
+            f"[WAKE] Recovering microphone after error "
+            f"(attempt {self._stream_retries}, retrying in {delay:.1f}s)..."
+        )
+        if self._stream_retries > 5:
+            print(f"[WAKE] Microphone recovery failed after 5 attempts: {reason}")
+            return False
 
-        except Exception as exc:
-            print(f"[WAKE ERROR] {exc}")
-            self.error.emit(str(exc))
-
-        print("[WAKE] Local wake listener stopped.")
+        time.sleep(delay)
+        return self.running
 
     def _detect_wake_phrase(self, stream, initial_pcm):
         """Briefly capture candidate speech and look for a wake phrase."""
@@ -130,6 +168,9 @@ class WakeListener(QThread):
             if not self._stt_error_logged:
                 print(f"[WAKE] Wake-phrase fallback unavailable: {exc}")
                 self._stt_error_logged = True
+            return False
+        except OSError as exc:
+            print(f"[WAKE] Wake-phrase network/audio error: {exc}")
             return False
 
         normalized = re.sub(r"[^a-z ]", " ", text)
