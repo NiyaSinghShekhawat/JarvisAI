@@ -1,4 +1,5 @@
 from pathlib import Path
+from difflib import SequenceMatcher
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -7,7 +8,6 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from backend.tools.browser import open_in_browser
-
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
@@ -23,7 +23,6 @@ DRIVE_SCOPE = "https://www.googleapis.com/auth/drive.readonly"
 def _run_oauth_flow():
     if not CREDENTIALS_FILE.exists():
         raise FileNotFoundError("credentials.json not found in the Jarvis project root.")
-
     print("[DRIVE] Starting Google OAuth authorization for Drive...")
     flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_FILE), SCOPES)
     creds = flow.run_local_server(port=0)
@@ -34,7 +33,6 @@ def _run_oauth_flow():
 
 def get_drive_service():
     creds = None
-
     if TOKEN_FILE.exists():
         try:
             creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
@@ -55,20 +53,38 @@ def get_drive_service():
     granted_scopes = set(creds.scopes or []) if creds else set()
     if not creds or not creds.valid or DRIVE_SCOPE not in granted_scopes:
         creds = _run_oauth_flow()
-
     return build("drive", "v3", credentials=creds)
 
 
-def search_drive_files(query: str, limit: int = 10, open_first: bool = False):
-    """Search Drive and optionally open the best matching file."""
-    service = get_drive_service()
+def _score_file(file: dict, query: str) -> float:
+    """Rank a Drive result by how closely its name matches the requested phrase."""
+    name = (file.get("name") or "").lower()
+    q = query.strip().lower()
+    if not name or not q:
+        return 0.0
 
+    score = SequenceMatcher(None, name, q).ratio()
+    q_words = {w for w in q.replace("_", " ").split() if w}
+    name_words = {w for w in name.replace("_", " ").split() if w}
+    if q_words:
+        score += 0.7 * len(q_words & name_words) / len(q_words)
+    if q in name:
+        score += 1.5
+    return score
+
+
+def _best_match(files: list[dict], query: str):
+    if not files:
+        return None
+    return max(files, key=lambda f: _score_file(f, query))
+
+
+def _search(service, query: str, limit: int = 10):
     safe_query = query.replace("'", "\\'")
     drive_query = (
         "trashed = false and "
         f"(name contains '{safe_query}' or fullText contains '{safe_query}')"
     )
-
     result = service.files().list(
         q=drive_query,
         pageSize=max(1, min(limit, 100)),
@@ -76,13 +92,18 @@ def search_drive_files(query: str, limit: int = 10, open_first: bool = False):
         spaces="drive",
         fields="files(id,name,mimeType,modifiedTime,webViewLink,size)",
     ).execute()
+    return result.get("files", [])
 
-    files = result.get("files", [])
+
+def search_drive_files(query: str, limit: int = 10, open_first: bool = False):
+    """Search Drive and optionally open the best filename/content match."""
+    service = get_drive_service()
+    files = _search(service, query, limit)
     opened = False
     opened_file = None
 
     if open_first and files:
-        opened_file = files[0]
+        opened_file = _best_match(files, query)
         url = opened_file.get("webViewLink") or f"https://drive.google.com/open?id={opened_file['id']}"
         opened = open_in_browser(url)
         print(f"[DRIVE] Opening '{opened_file.get('name', 'file')}' in browser: {opened}")
@@ -91,35 +112,23 @@ def search_drive_files(query: str, limit: int = 10, open_first: bool = False):
         "success": True,
         "query": query,
         "files": files,
+        "best_match": _best_match(files, query).get("name") if files else None,
         "opened": opened,
         "opened_file": opened_file,
     }
 
 
 def open_drive_file(file_id: str = "", query: str = ""):
-    """Open a Drive file by ID, or search by query and open the first match."""
+    """Open a Drive file by ID, or search and open the best matching file."""
     service = get_drive_service()
 
     if not file_id:
         if not query:
             return {"success": False, "error": "Provide a file_id or search query."}
-
-        safe_query = query.replace("'", "\\'")
-        drive_query = (
-            "trashed = false and "
-            f"(name contains '{safe_query}' or fullText contains '{safe_query}')"
-        )
-        result = service.files().list(
-            q=drive_query,
-            pageSize=1,
-            orderBy="modifiedTime desc",
-            spaces="drive",
-            fields="files(id,name,mimeType,webViewLink)",
-        ).execute()
-        files = result.get("files", [])
-        if not files:
+        files = _search(service, query, 25)
+        file = _best_match(files, query)
+        if not file:
             return {"success": False, "error": f"No Drive file found for '{query}'."}
-        file = files[0]
         file_id = file["id"]
     else:
         file = service.files().get(
@@ -130,11 +139,11 @@ def open_drive_file(file_id: str = "", query: str = ""):
     url = file.get("webViewLink") or f"https://drive.google.com/open?id={file_id}"
     opened = open_in_browser(url)
     print(f"[DRIVE] Opening '{file.get('name', 'file')}' in browser: {opened}")
-
     return {
-        "success": True,
+        "success": opened,
         "id": file["id"],
         "name": file.get("name", ""),
         "mimeType": file.get("mimeType", ""),
         "opened": opened,
+        "error": None if opened else "Browser could not be opened.",
     }
