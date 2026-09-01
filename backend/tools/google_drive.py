@@ -1,4 +1,3 @@
-import webbrowser
 from pathlib import Path
 
 from google.auth.exceptions import RefreshError
@@ -6,6 +5,8 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+
+from backend.tools.browser import open_in_browser
 
 
 SCOPES = [
@@ -65,11 +66,7 @@ def get_drive_service():
 
     granted_scopes = set(creds.scopes or []) if creds else set()
 
-    if (
-        not creds
-        or not creds.valid
-        or DRIVE_SCOPE not in granted_scopes
-    ):
+    if not creds or not creds.valid or DRIVE_SCOPE not in granted_scopes:
         creds = _run_oauth_flow()
 
     return build("drive", "v3", credentials=creds)
@@ -103,7 +100,7 @@ def search_drive_files(query: str, limit: int = 10):
 
 
 def open_drive_file(file_id: str):
-    """Open a specific Google Drive file in the default browser."""
+    """Open a specific Google Drive file in Chrome/default browser."""
     service = get_drive_service()
 
     file = service.files().get(
@@ -111,16 +108,17 @@ def open_drive_file(file_id: str):
         fields="id,name,mimeType,webViewLink",
     ).execute()
 
-    url = file.get("webViewLink")
-    if not url:
-        url = f"https://drive.google.com/open?id={file_id}"
+    url = file.get("webViewLink") or f"https://drive.google.com/open?id={file_id}"
+    opened = open_in_browser(url)
 
-    webbrowser.open(url)
+    print(
+        f"[DRIVE] Opening '{file.get('name', 'file')}' in browser: {opened}"
+    )
 
     return {
         "success": True,
         "id": file["id"],
         "name": file.get("name", ""),
         "mimeType": file.get("mimeType", ""),
-        "url": url,
+        "opened": opened,
     }
