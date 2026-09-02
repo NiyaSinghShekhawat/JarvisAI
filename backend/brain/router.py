@@ -6,10 +6,46 @@ from backend.tools.tools_registry import TOOL_DEFINITIONS, execute_tool
 
 
 MAX_TOOL_ROUNDS = 5
+_roast_mode = False
+
+
+ROAST_PROMPT = """
+ROAST MODE IS ON.
+
+Jarvis is still helpful and accurate, but now has a dry, witty, slightly
+moody personality. Think clever British-style AI banter rather than a
+stand-up comedian.
+
+- Tease the user lightly when the situation invites it.
+- Be playful, sarcastic and occasionally dramatic.
+- Never be cruel, hateful, threatening, sexual, or genuinely insulting.
+- Never roast sensitive personal traits or protected characteristics.
+- Never let the joke obscure the actual answer or action.
+- Keep roasts short; do not turn every sentence into a joke.
+- If the user is stressed or asks for serious help, dial the humor down.
+- Do not announce "roast mode" in every response.
+- Example tone: "Done. Because apparently clicking the button was too
+  much responsibility for today."
+"""
+
+
+def set_roast_mode(enabled: bool):
+    """Enable or disable Jarvis's playful roast personality."""
+    global _roast_mode
+    _roast_mode = bool(enabled)
+    print(f"[JARVIS] Roast mode: {'ON' if _roast_mode else 'OFF'}")
+
+
+def is_roast_mode():
+    return _roast_mode
 
 
 def _build_messages(message: str, conversation=None):
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}]
+    system_prompt = SYSTEM_PROMPT
+    if _roast_mode:
+        system_prompt += "\n\n" + ROAST_PROMPT
+
+    messages = [{"role": "system", "content": system_prompt}]
     if conversation:
         messages.extend(conversation)
     messages.append({"role": "user", "content": message})
@@ -30,7 +66,9 @@ def _clean_tool_arguments(arguments):
 
 
 def get_router_status():
-    return get_provider_info()
+    status = get_provider_info()
+    status["roast_mode"] = _roast_mode
+    return status
 
 
 def process_request(user_input: str, conversation=None):
@@ -43,7 +81,7 @@ def process_request(user_input: str, conversation=None):
             messages=messages,
             tools=TOOL_DEFINITIONS,
             tool_choice="auto",
-            temperature=0.5,
+            temperature=0.7 if _roast_mode else 0.5,
             max_tokens=128,
         )
 
@@ -101,7 +139,7 @@ def process_request_stream(user_input: str, conversation=None) -> Generator[dict
             messages=messages,
             tools=TOOL_DEFINITIONS,
             tool_choice="auto",
-            temperature=0.5,
+            temperature=0.7 if _roast_mode else 0.5,
             max_tokens=128,
             stream=True,
         )
