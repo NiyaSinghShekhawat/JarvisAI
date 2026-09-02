@@ -9,14 +9,14 @@ from PyQt6.QtCore import QObject, pyqtSignal
 from voice.speech_sanitizer import speech_safe_text
 
 
-# Prefer the more natural Microsoft voices when they are installed.
-# SAPI will fall back to the first available voice on the machine.
+# Prefer a male SAPI voice. Microsoft David is the common Windows male voice;
+# Guy and Mark are also supported when installed.
 PREFERRED_VOICES = (
-    "Microsoft Ava",
-    "Microsoft Jenny",
-    "Microsoft Zira",
-    "Microsoft Aria",
     "Microsoft David",
+    "Microsoft Guy",
+    "Microsoft Mark",
+    "Microsoft Ryan",
+    "Microsoft George",
 )
 
 
@@ -55,7 +55,7 @@ class TextToSpeech(QObject):
 
     @staticmethod
     def _select_voice(engine):
-        """Choose a natural installed Microsoft voice, otherwise use default."""
+        """Choose an installed male Microsoft voice when possible."""
         voices = engine.getProperty("voices") or []
         if not voices:
             return None
@@ -67,6 +67,12 @@ class TextToSpeech(QObject):
                 if preferred_lower in name.lower():
                     return voice
 
+        # pyttsx3/SAPI exposes gender inconsistently. If the voice metadata
+        # is available, prefer a voice explicitly marked Male.
+        for voice in voices:
+            if str(getattr(voice, "gender", "")).lower() == "male":
+                return voice
+
         return voices[0]
 
     @staticmethod
@@ -76,12 +82,9 @@ class TextToSpeech(QObject):
         if not text:
             return ""
 
-        # Remove UI-oriented symbols that sound unnatural when spoken.
         text = re.sub(r"^[\s•▪◦]+", "", text, flags=re.MULTILINE)
         text = re.sub(r"\s*[|]+\s*", ", ", text)
         text = re.sub(r"\s{2,}", " ", text)
-
-        # Give SAPI a little breathing room around sentence boundaries.
         text = re.sub(r"([.!?])\s+", r"\1  ", text)
         return text.strip()
 
