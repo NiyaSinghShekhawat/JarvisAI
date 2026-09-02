@@ -21,7 +21,7 @@ WAKE_PHRASES = (
 
 
 class WakeListener(QThread):
-    """Single microphone owner for passive local wake detection."""
+    """Single microphone owner for passive wake detection."""
 
     wake_detected = pyqtSignal(str)
     level = pyqtSignal(float)
@@ -46,7 +46,6 @@ class WakeListener(QThread):
         while self.running:
             try:
                 self._listen_session()
-                # A normal return means stop() was requested or a wake was found.
                 if self.running:
                     self._recover_stream("wake listener session ended unexpectedly")
             except (sd.PortAudioError, OSError) as exc:
@@ -66,25 +65,20 @@ class WakeListener(QThread):
         print("[WAKE] Local wake listener stopped.")
 
     def _listen_session(self):
-        """Own the microphone for one session; transient Windows audio errors are recovered by run()."""
+        """Keep the microphone open and use STT as a robust phrase fallback."""
         with sd.InputStream(
             device=MIC_DEVICE,
             samplerate=MIC_SAMPLE_RATE,
             channels=MIC_CHANNELS,
             dtype="float32",
-            blocksize=3840,  # 80 ms @ 48 kHz -> 1280 samples @ 16 kHz
+            blocksize=3840,
         ) as stream:
             self._stream_retries = 0
             self._calibrate(stream)
             print("[WAKE] Listening locally for wake triggers.")
 
             while self.running:
-                try:
-                    audio, _ = stream.read(3840)
-                except Exception:
-                    # Let run() classify/recover the underlying Windows/PortAudio error.
-                    raise
-
+                audio, _ = stream.read(3840)
                 samples = np.squeeze(audio.copy())
 
                 if samples.size == 0:
@@ -93,6 +87,7 @@ class WakeListener(QThread):
                 rms = float(np.sqrt(np.mean(np.square(samples))))
                 self.level.emit(min(1.0, rms * 5.0))
 
+                # Double clap stays completely local and independent of STT.
                 if self.clap.process(samples):
                     print("[WAKE] DOUBLE CLAP DETECTED!")
                     self.wake_detected.emit("clap")
@@ -106,21 +101,26 @@ class WakeListener(QThread):
                 wake_samples = np.asarray(wake_samples, dtype=np.float32)
                 wake_pcm = (np.clip(wake_samples, -1.0, 1.0) * 32767).astype(np.int16)
 
-                # Native openWakeWord detector: "Hey Jarvis".
+                # Use openWakeWord when it is available for Hey Jarvis.
                 if self.wake_word.process(wake_pcm):
                     self.wake_detected.emit("voice")
                     return
 
-                # Compatibility fallback for "Wake up Jarvis". This only
-                # invokes speech recognition after clear voice activity.
-                if rms >= 0.05 and (time.monotonic() - self._last_phrase_check) >= 1.5:
-                    self._last_phrase_check = time.monotonic()
+                # Robust fallback for Hey Jarvis / Wake up Jarvis. The old
+                # fixed RMS=0.05 gate was too aggressive on some microphones.
+                # Use a conservative calibrated threshold instead.
+                noise_rms = max(self.clap.noise_rms, 0.0001)
+                speech_threshold = max(0.008, noise_rms * 10.0)
+                now = time.monotonic()
+
+                if rms >= speech_threshold and (now - self._last_phrase_check) >= 1.0:
+                    self._last_phrase_check = now
                     if self._detect_wake_phrase(stream, wake_pcm):
                         self.wake_detected.emit("voice")
                         return
 
     def _recover_stream(self, reason):
-        """Back off and reopen the microphone after a transient Windows audio failure."""
+        """Back off and reopen the microphone after a transient audio failure."""
         self._stream_retries += 1
         delay = min(3.0, 0.5 * self._stream_retries)
         print(
@@ -135,9 +135,9 @@ class WakeListener(QThread):
         return self.running
 
     def _detect_wake_phrase(self, stream, initial_pcm):
-        """Briefly capture candidate speech and look for a wake phrase."""
+        """Capture a short speech window and match the configured wake phrases."""
         frames = [initial_pcm]
-        deadline = time.monotonic() + 1.8
+        deadline = time.monotonic() + 2.2
 
         while self.running and time.monotonic() < deadline:
             audio, _ = stream.read(3840)
