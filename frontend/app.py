@@ -33,7 +33,6 @@ TextToSpeech.finish_response = _safe_finish_response
 
 
 def main():
-
     app = QApplication(sys.argv)
 
     app.setApplicationName("Jarvis")
@@ -41,13 +40,18 @@ def main():
 
     window = JarvisWindow()
 
-    # Start passive wake detection.
-    # Jarvis remains invisible until activated.
+    # Phase 1: Jarvis is a normal launched desktop app. Wake triggers do not
+    # need to launch a process; they simply bring this already-running window
+    # to the foreground and activate voice input.
+    window.showFullScreen()
+    window.raise_()
+    window.activateWindow()
+
+    # Keep passive wake detection running while Jarvis is open. A later phase
+    # can move this listener into a separate background/tray process.
     window.start_wake_listener()
 
-    sys.exit(
-        app.exec()
-    )
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
