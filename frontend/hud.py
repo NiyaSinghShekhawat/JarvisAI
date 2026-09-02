@@ -17,6 +17,10 @@ class JarvisHUD(QWidget):
 
     def tick(self):
         self.phase += 0.035
+        # The HUD is a child of the central widget. Keep its geometry locked
+        # to the central widget so the dashboard always follows fullscreen,
+        # maximize, restore, and monitor-size changes.
+        self.sync_geometry()
         self.update()
 
     def sync_geometry(self):
@@ -159,20 +163,24 @@ class JarvisHUD(QWidget):
         p.setPen(QPen(QColor(a.red(), a.green(), a.blue(), 12), 1))
         p.drawLine(QPointF(0, scan), QPointF(w, scan))
 
-        sw = min(245, max(205, int(w * 0.165)))
-        lx = max(26, int(w * 0.025))
-        rx = w - sw - lx
-        top = max(60, int(h * 0.075))
-        mid = int(h * 0.47)
+        # Responsive panel geometry. The HUD uses the full central widget,
+        # so the four panels stay in the four screen quadrants instead of
+        # being trapped inside the window's original launch-size rectangle.
+        margin_x = max(28, int(w * 0.035))
+        panel_w = min(300, max(235, int(w * 0.19)))
+        left_x = margin_x
+        right_x = w - panel_w - margin_x
+        top_y = max(72, int(h * 0.09))
+        bottom_y = max(top_y + 180, int(h * 0.62))
 
-        self.panel(p, QRectF(lx, top, sw, 112), "SYSTEM / CORE", [
+        self.panel(p, QRectF(left_x, top_y, panel_w, 126), "SYSTEM / CORE", [
             "NEURAL CORE   ONLINE",
             "MEMORY        ACTIVE",
             "VOICE         READY",
             "LINK          STABLE",
             "SECURITY      NOMINAL",
         ], a)
-        self.panel(p, QRectF(rx, top, sw, 126), "MODULES", [
+        self.panel(p, QRectF(right_x, top_y, panel_w, 126), "MODULES", [
             "WEATHER       READY",
             "GMAIL         READY",
             "DRIVE         READY",
@@ -180,14 +188,14 @@ class JarvisHUD(QWidget):
             "TOOLS         ARMED",
             "VOICE         ONLINE",
         ], a)
-        self.panel(p, QRectF(lx, mid, sw, 108), "TELEMETRY", [
+        self.panel(p, QRectF(left_x, bottom_y, panel_w, 118), "TELEMETRY", [
             f"ACTIVITY   {int((math.sin(self.phase * 2) + 1) * 50):02d}%",
             "AUDIO      24.0 kHz",
             "ENGINE     GROQ",
             "MODEL      ONLINE",
             "LATENCY    NOMINAL",
         ], a)
-        self.panel(p, QRectF(rx, mid, sw, 108), "ACTIVITY", [
+        self.panel(p, QRectF(right_x, bottom_y, panel_w, 118), "ACTIVITY", [
             f"STATE      {self.state().upper()}",
             "STREAM     ENABLED",
             "CONTEXT    ACTIVE",
@@ -197,8 +205,8 @@ class JarvisHUD(QWidget):
 
         p.setFont(QFont("Consolas", 7))
         p.setPen(QColor(a.red(), a.green(), a.blue(), 120))
-        p.drawText(lx + 3, h - 28, "JARVIS // PERSONAL AI SYSTEM")
-        p.drawText(rx + 3, h - 28, "SECURE CHANNEL // 01")
+        p.drawText(left_x + 3, h - 28, "JARVIS // PERSONAL AI SYSTEM")
+        p.drawText(right_x + 3, h - 28, "SECURE CHANNEL // 01")
 
         cx, cy = w / 2, h / 2 - 10
         size = min(195, w * 0.16)
