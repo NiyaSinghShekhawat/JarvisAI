@@ -1,44 +1,33 @@
-import json
-import os
 import sys
+import json
 import tempfile
+import os
 
 import numpy as np
 import soundfile as sf
 from kokoro import KPipeline
 
 
-VOICE = "am_adam"
-SAMPLE_RATE = 24000
+print("[KOKORO] Loading Kokoro model...", file=sys.stderr)
 
-
-def log(message):
-    """Write diagnostics to stderr without affecting the stdout protocol."""
-    try:
-        print(message, file=sys.stderr, flush=True)
-    except (OSError, ValueError):
-        pass
-
-
-log("[KOKORO] Loading Kokoro model...")
 pipeline = KPipeline(
     lang_code="a",
     repo_id="hexgrad/Kokoro-82M",
 )
-log(f"[KOKORO] Ready. Voice: {VOICE}")
 
-# stdout is a strict JSON-lines protocol used by voice/text_to_speech.py.
-# The first message is the readiness handshake, emitted only after the model
-# has finished loading.
-try:
-    print(json.dumps({"ready": True, "voice": VOICE}), flush=True)
-except (OSError, ValueError):
-    sys.exit(1)
+VOICE = "am_adam"
+SAMPLE_RATE = 24000
+
+print(f"[KOKORO] Ready. Voice: {VOICE}", file=sys.stderr)
 
 
 def synthesize(text):
     chunks = []
-    generator = pipeline(text, voice=VOICE)
+
+    generator = pipeline(
+        text,
+        voice=VOICE,
+    )
 
     for _, _, audio in generator:
         chunks.append(audio)
@@ -47,46 +36,57 @@ def synthesize(text):
         raise RuntimeError("Kokoro generated no audio.")
 
     audio = np.concatenate(chunks)
+
     fd, path = tempfile.mkstemp(
         suffix=".wav",
         prefix="jarvis_kokoro_",
     )
     os.close(fd)
 
-    sf.write(path, audio, SAMPLE_RATE)
+    sf.write(
+        path,
+        audio,
+        SAMPLE_RATE,
+    )
+
     return path
 
 
 for line in sys.stdin:
     line = line.strip()
+
     if not line:
         continue
 
     try:
         request = json.loads(line)
-        command = request.get("command")
 
-        if command == "speak":
+        if request.get("command") == "speak":
             text = request.get("text", "").strip()
+
             if not text:
-                print(json.dumps({"error": "Empty text"}), flush=True)
+                print(
+                    json.dumps({"error": "Empty text"}),
+                    flush=True,
+                )
                 continue
 
             path = synthesize(text)
-            print(json.dumps({"audio": path}), flush=True)
 
-        elif command == "shutdown":
-            break
-
-        else:
             print(
-                json.dumps({"error": f"Unknown command: {command}"}),
+                json.dumps({
+                    "audio": path,
+                }),
                 flush=True,
             )
 
-    except Exception as e:
-        log(f"[KOKORO ERROR] {e}")
-        try:
-            print(json.dumps({"error": str(e)}), flush=True)
-        except (OSError, ValueError):
+        elif request.get("command") == "shutdown":
             break
+
+    except Exception as e:
+        print(
+            json.dumps({
+                "error": str(e),
+            }),
+            flush=True,
+        )
