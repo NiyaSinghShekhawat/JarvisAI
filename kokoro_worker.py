@@ -8,7 +8,7 @@ import soundfile as sf
 from kokoro import KPipeline
 
 
-print("[KOKORO] Loading Kokoro model...", file=sys.stderr)
+print("[KOKORO] Loading Kokoro model...", file=sys.stderr, flush=True)
 
 pipeline = KPipeline(
     lang_code="a",
@@ -18,7 +18,17 @@ pipeline = KPipeline(
 VOICE = "am_adam"
 SAMPLE_RATE = 24000
 
-print(f"[KOKORO] Ready. Voice: {VOICE}", file=sys.stderr)
+print(f"[KOKORO] Ready. Voice: {VOICE}", file=sys.stderr, flush=True)
+
+# Tell the parent TTS process that model loading is complete.
+# The parent waits for this JSON line before sending speech requests.
+print(
+    json.dumps({
+        "ready": True,
+        "voice": VOICE,
+    }),
+    flush=True,
+)
 
 
 def synthesize(text):
