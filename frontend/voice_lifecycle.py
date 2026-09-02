@@ -88,9 +88,16 @@ def install_voice_lifecycle():
         app_module._original_activate_voice(self)
 
     def safe_voice_finished(self):
-        """Start the next capture only after Qt has fully stopped this thread."""
+        """Do not reopen the microphone while Jarvis is processing or speaking."""
         original_voice_finished(self)
-        self._schedule_voice_capture(80)
+        if not getattr(self, "voice_mode_enabled", False):
+            return
+
+        # Normal answers are followed by TTS. Waiting for response_finished is
+        # important: otherwise STT can reopen the shared microphone just before
+        # the stop-word listener starts, creating two competing InputStreams.
+        if getattr(self, "visual_response_mode", False):
+            self._schedule_voice_capture(120)
 
     def safe_voice_error(self, error):
         """Retry microphone errors without stacking QThreads."""
@@ -102,8 +109,8 @@ def install_voice_lifecycle():
         """Run the stop-word listener only while no STT capture owns the mic."""
         original_tts_started(self)
         if getattr(self, "voice_mode_enabled", False):
-            # Continuous STT is intentionally paused during speech, so the
-            # stop-word listener is the sole microphone consumer here.
+            # Continuous STT is paused during speech, so the stop-word listener
+            # is the sole microphone consumer here.
             self._start_stop_listener()
 
     def safe_tts_response_finished(self):
