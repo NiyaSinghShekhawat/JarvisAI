@@ -1,9 +1,23 @@
 import gc
 import queue
+import re
 import threading
 
 import pyttsx3
 from PyQt6.QtCore import QObject, pyqtSignal
+
+from voice.speech_sanitizer import speech_safe_text
+
+
+# Prefer the more natural Microsoft voices when they are installed.
+# SAPI will fall back to the first available voice on the machine.
+PREFERRED_VOICES = (
+    "Microsoft Ava",
+    "Microsoft Jenny",
+    "Microsoft Zira",
+    "Microsoft Aria",
+    "Microsoft David",
+)
 
 
 class TextToSpeech(QObject):
@@ -16,7 +30,7 @@ class TextToSpeech(QObject):
     level = pyqtSignal(float)
     error = pyqtSignal(str)
 
-    def __init__(self, rate=180, volume=1.0):
+    def __init__(self, rate=168, volume=1.0):
         super().__init__()
 
         self.rate = rate
@@ -39,6 +53,38 @@ class TextToSpeech(QObject):
         )
         self.thread.start()
 
+    @staticmethod
+    def _select_voice(engine):
+        """Choose a natural installed Microsoft voice, otherwise use default."""
+        voices = engine.getProperty("voices") or []
+        if not voices:
+            return None
+
+        for preferred in PREFERRED_VOICES:
+            preferred_lower = preferred.lower()
+            for voice in voices:
+                name = getattr(voice, "name", "") or ""
+                if preferred_lower in name.lower():
+                    return voice
+
+        return voices[0]
+
+    @staticmethod
+    def _naturalize(text):
+        """Prepare visual LLM output for speech without changing its meaning."""
+        text = speech_safe_text(text)
+        if not text:
+            return ""
+
+        # Remove UI-oriented symbols that sound unnatural when spoken.
+        text = re.sub(r"^[\s•▪◦]+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"\s*[|]+\s*", ", ", text)
+        text = re.sub(r"\s{2,}", " ", text)
+
+        # Give SAPI a little breathing room around sentence boundaries.
+        text = re.sub(r"([.!?])\s+", r"\1  ", text)
+        return text.strip()
+
     def _run(self):
         import pythoncom
 
@@ -56,14 +102,10 @@ class TextToSpeech(QObject):
                 if item[0] != "speak":
                     continue
 
-                text = item[1]
-                if not text or not text.strip():
+                text = self._naturalize(item[1])
+                if not text:
                     continue
 
-                # IMPORTANT: create a fresh SAPI5 engine for every response.
-                # On Windows, reusing one pyttsx3 SAPI5 instance across
-                # multiple runAndWait() cycles can silently fail after the
-                # first utterance. The COM thread itself remains persistent.
                 with self.engine_lock:
                     if self.stop_requested:
                         self.stop_requested = False
@@ -75,11 +117,11 @@ class TextToSpeech(QObject):
 
                 try:
                     engine = pyttsx3.init("sapi5")
-                    voices = engine.getProperty("voices")
+                    voice = self._select_voice(engine)
 
-                    if voices:
-                        engine.setProperty("voice", voices[0].id)
-                        print(f"[TTS] Voice: {voices[0].name}")
+                    if voice is not None:
+                        engine.setProperty("voice", voice.id)
+                        print(f"[TTS] Voice: {voice.name}")
 
                     engine.setProperty("rate", self.rate)
                     engine.setProperty("volume", self.volume)
@@ -116,7 +158,6 @@ class TextToSpeech(QObject):
                     except Exception:
                         pass
 
-                    # Release the SAPI COM object before the next response.
                     del engine
                     gc.collect()
 
@@ -158,15 +199,17 @@ class TextToSpeech(QObject):
             print("[TTS] finish_response called with empty buffer.")
             return
 
-        print(f"[TTS] Queueing: {text}")
-        self.queue.put(("speak", text))
+        safe_text = self._naturalize(text)
+        if not safe_text:
+            return
+
+        print(f"[TTS] Queueing: {safe_text}")
+        self.queue.put(("speak", safe_text))
 
     def stop_speaking(self):
         with self.lock:
             self.buffer = ""
 
-        # Remove waiting responses, but do not leave the queue in a broken
-        # state for the next request.
         try:
             while True:
                 self.queue.get_nowait()
