@@ -204,6 +204,14 @@ def process_request_stream(user_input: str, conversation=None) -> Generator[dict
             except Exception as e:
                 result = {"success": False, "error": str(e)}
 
+            # Let the desktop UI render rich tool results (especially mail)
+            # without forcing the LLM to repeat the entire payload aloud.
+            yield {
+                "type": "tool_result",
+                "tool": tool_name,
+                "result": result,
+            }
+
             messages.append({
                 "role": "tool",
                 "tool_call_id": call["id"],
