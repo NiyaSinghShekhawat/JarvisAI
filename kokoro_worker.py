@@ -88,4 +88,5 @@ for line in sys.stdin:
             json.dumps({
                 "error": str(e),
             }),
-            flush=True,)
+            flush=True,
+        )
