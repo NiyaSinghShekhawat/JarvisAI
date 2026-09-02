@@ -1,13 +1,15 @@
-"""Runtime additions for Jarvis interruption, orb presentation, and mail UI."""
+"""Runtime additions for Jarvis interruption, orb presentation, mail UI, and personality controls."""
 
 import math
 
 from PyQt6.QtCore import Qt, QTimer, QPointF
 from PyQt6.QtGui import QColor, QPainter, QPen, QRadialGradient, QFont
+from PyQt6.QtWidgets import QPushButton
 
 from frontend.window import JarvisWindow, JarvisOrb
 from frontend.email_viewer import EmailViewer
 from voice.wake_word import StopWordWorker
+from backend.brain.router import set_roast_mode, is_roast_mode
 
 
 # ============================================================
@@ -70,29 +72,17 @@ def _larger_orb_paint(self, event):
     )
     orb_gradient.setColorAt(0.0, QColor("#0A263A"))
     orb_gradient.setColorAt(0.45, QColor("#041521"))
-    orb_gradient.setColorAt(
-        0.78,
-        QColor(primary.red(), primary.green(), primary.blue(), 35),
-    )
+    orb_gradient.setColorAt(0.78, QColor(primary.red(), primary.green(), primary.blue(), 35))
     orb_gradient.setColorAt(1.0, QColor("#02070D"))
 
     painter.setBrush(orb_gradient)
-    painter.setPen(QPen(
-        QColor(primary.red(), primary.green(), primary.blue(), 230),
-        1,
-    ))
+    painter.setPen(QPen(QColor(primary.red(), primary.green(), primary.blue(), 230), 1))
     painter.drawEllipse(center, dynamic_radius, dynamic_radius)
 
     inner_radius = dynamic_radius * 0.65
     inner_gradient = QRadialGradient(center, inner_radius)
-    inner_gradient.setColorAt(
-        0.0,
-        QColor(primary.red(), primary.green(), primary.blue(), 22),
-    )
-    inner_gradient.setColorAt(
-        1.0,
-        QColor(primary.red(), primary.green(), primary.blue(), 0),
-    )
+    inner_gradient.setColorAt(0.0, QColor(primary.red(), primary.green(), primary.blue(), 22))
+    inner_gradient.setColorAt(1.0, QColor(primary.red(), primary.green(), primary.blue(), 0))
 
     painter.setPen(Qt.PenStyle.NoPen)
     painter.setBrush(inner_gradient)
@@ -105,14 +95,7 @@ def _larger_orb_paint(self, event):
     painter.setFont(font)
 
     text = "J A R V I S"
-    rect = painter.boundingRect(
-        0,
-        0,
-        self.width(),
-        self.height(),
-        Qt.AlignmentFlag.AlignCenter,
-        text,
-    )
+    rect = painter.boundingRect(0, 0, self.width(), self.height(), Qt.AlignmentFlag.AlignCenter, text)
     painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, text)
     painter.end()
 
@@ -131,7 +114,6 @@ _original_handle_response = JarvisWindow.handle_response
 _original_handle_error = JarvisWindow.handle_error
 _original_tts_response_finished = JarvisWindow.tts_response_finished
 _original_show_orb_mode = JarvisWindow.show_orb_mode
-_original_handle_wake = JarvisWindow.handle_wake
 
 
 def _open_email_viewer(self):
@@ -156,12 +138,60 @@ def _connect_mail_button(self):
             return
 
 
+def _add_roast_toggle(self):
+    """Add a small persistent personality toggle to the bottom bar."""
+    if getattr(self, "roast_button", None) is not None:
+        return
+
+    self.roast_button = QPushButton("ROAST")
+    self.roast_button.setCheckable(True)
+    self.roast_button.setChecked(is_roast_mode())
+    self.roast_button.setFixedHeight(30)
+    self.roast_button.setToolTip("Toggle Jarvis Roast Mode")
+    self.roast_button.setStyleSheet(
+        """
+        QPushButton {
+            color: #71899F;
+            background: transparent;
+            border: 1px solid rgba(113,137,159,70);
+            border-radius: 15px;
+            padding: 0 12px;
+            font-size: 10px;
+            font-weight: 600;
+            letter-spacing: 1px;
+        }
+        QPushButton:hover {
+            color: #FFAA44;
+            border-color: rgba(255,170,68,150);
+            background: rgba(255,170,68,15);
+        }
+        QPushButton:checked {
+            color: #FFAA44;
+            border-color: rgba(255,170,68,190);
+            background: rgba(255,170,68,20);
+        }
+        """
+    )
+
+    def toggle_roast(checked):
+        set_roast_mode(checked)
+        if self.jarvis_mode == "full":
+            self.status.set_status(
+                "●  ROAST MODE" if checked else "●  IDLE",
+                "#FFAA44" if checked else "#527086",
+            )
+
+    self.roast_button.toggled.connect(toggle_roast)
+    self.bottom.insertWidget(0, self.roast_button)
+
+
 def _patched_window_init(self):
     _original_window_init(self)
     self.stop_worker = None
     self.response_cancelled = False
     self.email_viewer = None
     self.open_email_viewer = lambda: _open_email_viewer(self)
+    _add_roast_toggle(self)
     QTimer.singleShot(0, lambda: _connect_mail_button(self))
 
 
@@ -171,16 +201,13 @@ def _start_stop_listener(self):
 
     self.stop_worker = StopWordWorker()
     self.stop_worker.stop_detected.connect(self.handle_stop_command)
-    self.stop_worker.error.connect(
-        lambda error: print(f"[STOP] Listener error: {error}")
-    )
+    self.stop_worker.error.connect(lambda error: print(f"[STOP] Listener error: {error}"))
     self.stop_worker.finished.connect(self._stop_listener_finished)
     self.stop_worker.start()
 
 
 def _stop_stop_listener(self):
     worker = self.stop_worker
-
     if worker is None:
         return
 
@@ -207,7 +234,6 @@ def _patched_start_worker(self, message):
 def _patched_add_response_token(self, token):
     if self.response_cancelled:
         return
-
     _original_add_response_token(self, token)
 
 
@@ -215,7 +241,6 @@ def _patched_handle_response(self, result):
     if self.response_cancelled:
         self.tts.stop_speaking()
         return
-
     _original_handle_response(self, result)
 
 
@@ -225,7 +250,6 @@ def _handle_stop_command(self):
 
     print("[JARVIS] STOP command received.")
     self.response_cancelled = True
-
     self._stop_stop_listener()
     self.tts.stop_speaking()
 
@@ -235,10 +259,7 @@ def _handle_stop_command(self):
     if self.jarvis_mode == "full":
         self.status.set_status("●  STOPPED", "#FFAA44")
         self.response_label.hide()
-        QTimer.singleShot(
-            700,
-            lambda: self.status.set_status("●  IDLE", "#527086")
-        )
+        QTimer.singleShot(700, lambda: self.status.set_status("●  ROAST MODE" if is_roast_mode() else "●  IDLE", "#FFAA44" if is_roast_mode() else "#527086"))
     else:
         self.status.hide()
         self.interpreted_label.hide()
@@ -265,11 +286,7 @@ def _patched_show_orb_mode(self):
 
     geometry = screen.availableGeometry()
     margin = 8
-
-    self.move(
-        geometry.left() + margin,
-        geometry.bottom() - self.height() - margin,
-    )
+    self.move(geometry.left() + margin, geometry.bottom() - self.height() - margin)
 
 
 def _patched_handle_error(self, error):
@@ -278,8 +295,9 @@ def _patched_handle_error(self, error):
 
 
 def _patched_handle_wake(self, wake_type):
-    """Every wake trigger opens the main Jarvis interface fullscreen."""
-    print(f"[JARVIS] Wake event: {wake_type} -> FULLSCREEN")
+    """Wake triggers switch to the already-running Jarvis application."""
+    mode = "FULLSCREEN" if wake_type in ("clap", "wake_up") else "FULLSCREEN"
+    print(f"[JARVIS] Wake event: {wake_type} -> {mode}")
     self.stop_wake_listener()
     self.show_fullscreen_mode()
     self.activate_voice()
