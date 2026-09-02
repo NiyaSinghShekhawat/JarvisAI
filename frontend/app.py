@@ -147,8 +147,8 @@ def _start_voice_capture(self):
         return
 
     # VoiceWorker still records one utterance at a time. The patched
-    # voice_finished() immediately starts the next utterance, creating a
-    # continuous listening loop without reloading the STT implementation.
+    # voice_finished() starts the next utterance only after the previous
+    # QThread has fully stopped and the other microphone users are idle.
     _original_activate_voice(self)
 
 
@@ -165,15 +165,16 @@ def _persistent_voice_finished(self):
     if not getattr(self, "voice_mode_enabled", False):
         return
 
-    # Silence/no transcript is intentionally NOT treated as the end of voice
-    # mode. Start another capture and keep waiting for the user.
+    # Lifecycle coordination is installed after this module and replaces
+    # this method with a guarded scheduler. Keep this fallback for imports
+    # that do not load the lifecycle extension.
     QTimer.singleShot(80, self._start_voice_capture)
 
 
 def _persistent_handle_voice_transcript(self, text):
     # The existing handler stops TTS before submitting the new command.
-    # Because voice_mode_enabled stays true, another microphone capture is
-    # started as soon as this capture finishes. This enables natural barge-in.
+    # Because voice_mode_enabled stays true, the lifecycle manager starts
+    # another capture when all other workers have released the microphone.
     _original_handle_voice_transcript(self, text)
 
 
@@ -209,6 +210,13 @@ JarvisWindow._stop_voice_capture = _stop_voice_capture
 JarvisWindow._turn_voice_off = _turn_voice_off
 JarvisWindow.toggle_voice_input = _toggle_voice_input
 JarvisWindow._set_voice_button_state = _set_voice_button_state
+
+# Final lifecycle patch: this must run after the persistent-voice monkeypatches
+# above so it can coordinate STT, stop-word detection, LLM, and TTS ownership
+# of the shared microphone without changing the existing voice architecture.
+from frontend.voice_lifecycle import install_voice_lifecycle  # noqa: E402
+
+install_voice_lifecycle()
 
 
 def main():
