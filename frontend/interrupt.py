@@ -1,4 +1,4 @@
-"""Runtime additions for Jarvis interruption, orb presentation, mail UI, and personality controls."""
+"""Runtime additions for Jarvis interruption, orb presentation, mail UI, personality controls, and sci-fi HUD."""
 
 import math
 
@@ -8,6 +8,7 @@ from PyQt6.QtWidgets import QPushButton
 
 from frontend.window import JarvisWindow, JarvisOrb
 from frontend.email_viewer import EmailViewer
+from frontend.hud import JarvisHUD
 from voice.wake_word import StopWordWorker
 from backend.brain.router import set_roast_mode, is_roast_mode
 
@@ -185,6 +186,16 @@ def _add_roast_toggle(self):
     self.bottom.insertWidget(0, self.roast_button)
 
 
+def _install_hud(self):
+    """Install the non-interactive sci-fi command-center overlay."""
+    if getattr(self, "jarvis_hud", None) is not None:
+        return
+
+    self.jarvis_hud = JarvisHUD(self)
+    self.jarvis_hud.sync_geometry()
+    self.jarvis_hud.lower()
+
+
 def _patched_window_init(self):
     _original_window_init(self)
     self.stop_worker = None
@@ -192,6 +203,7 @@ def _patched_window_init(self):
     self.email_viewer = None
     self.open_email_viewer = lambda: _open_email_viewer(self)
     _add_roast_toggle(self)
+    _install_hud(self)
     QTimer.singleShot(0, lambda: _connect_mail_button(self))
 
 
@@ -329,6 +341,11 @@ def _show_fullscreen_mode(self):
     self.showFullScreen()
     self.raise_()
     self.activateWindow()
+
+    if getattr(self, "jarvis_hud", None) is not None:
+        self.jarvis_hud.show()
+        self.jarvis_hud.lower()
+        self.jarvis_hud.sync_geometry()
 
     print("[JARVIS] Fullscreen interface active.")
 
