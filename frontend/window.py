@@ -1,4 +1,5 @@
 import math
+import re
 import time
 
 from PyQt6.QtCore import (
@@ -34,6 +35,7 @@ from backend.brain.router import process_request_stream
 from voice.voice_worker import VoiceWorker
 from voice.text_to_speech import TextToSpeech
 from voice.wake_word import WakeWordWorker
+from frontend.response_card import ResponseCard
 
 BG = QColor("#02070D")
 BLUE = QColor("#008CFF")
@@ -46,6 +48,7 @@ MUTED = QColor("#71899F")
 
 class JarvisWorker(QThread):
     token_received = pyqtSignal(str)
+    tool_result = pyqtSignal(str, object)
     finished = pyqtSignal(str)
     failed = pyqtSignal(str)
 
@@ -62,6 +65,8 @@ class JarvisWorker(QThread):
                     token = event["content"]
                     full_response += token
                     self.token_received.emit(token)
+                elif event["type"] == "tool_result":
+                    self.tool_result.emit(event["tool"], event["result"])
             self.finished.emit(full_response)
         except Exception as e:
             self.failed.emit(str(e))
@@ -226,18 +231,7 @@ class IconButton(QPushButton):
 
 
 class JarvisWindow(QMainWindow):
-    def add_response_token(self, token):
-        current_text = self.response_label.text()
-        self.response_label.setText(current_text + token)
-        self.response_label.show()
-        print(f"[TTS FEED] {repr(token)}")
-        self.tts.feed(token)
-
-    def response_finished(self, response):
-        print("Jarvis finished responding.")
-
-    def response_error(self, error):
-        self.response_label.setText(f"Error: {error}")
+    VISUAL_EMAIL_TOOLS = {"get_recent_emails", "get_email", "search_emails"}
 
     def __init__(self):
         super().__init__()
@@ -251,6 +245,8 @@ class JarvisWindow(QMainWindow):
         self.wake_active = False
         self.full_central = None
         self.orb_container = None
+        self.visual_response_mode = False
+        self.tool_visual_active = False
 
         self.tts = TextToSpeech(rate=180, volume=1.0)
         self.tts.level.connect(self.update_speaking_level)
@@ -264,6 +260,78 @@ class JarvisWindow(QMainWindow):
         self.resize(1200, 850)
         self.setStyleSheet("QMainWindow { background-color: #02070D; }")
         self.build_ui()
+
+    @staticmethod
+    def is_visual_request(text):
+        """Decide when the answer is better consumed as a visual card."""
+        normalized = re.sub(r"\s+", " ", text.lower().strip())
+        if "?" in normalized:
+            return True
+
+        visual_starts = (
+            "what is ", "what are ", "what's ", "whats ", "who is ",
+            "where is ", "when is ", "why is ", "why are ", "why does ",
+            "how does ", "how do ", "how can ", "explain ", "define ",
+            "compare ", "difference between ", "difference in ", "tell me about ",
+            "give me the difference", "versus ", "vs ", "list the ",
+        )
+        if normalized.startswith(visual_starts):
+            return True
+
+        email_phrases = (
+            "check my mail", "check my email", "read my mail", "read my email",
+            "show my mail", "show my email", "open that mail", "open that email",
+            "open the mail", "open the email", "content of that mail",
+            "content of that email", "contents of that mail", "contents of that email",
+            "recent emails", "recent mail", "my emails", "my mail",
+        )
+        return any(phrase in normalized for phrase in email_phrases)
+
+    def add_response_token(self, token):
+        current_text = self.response_label.text()
+        self.response_label.setText(current_text + token)
+        self.response_label.show()
+
+        if self.visual_response_mode:
+            self.presentation_card.set_text(self.presentation_card.body.toPlainText() + token)
+            self.presentation_card.show()
+            return
+
+        print(f"[TTS FEED] {repr(token)}")
+        self.tts.feed(token)
+
+    def handle_tool_result(self, tool_name, result):
+        if tool_name not in self.VISUAL_EMAIL_TOOLS or not self.visual_response_mode:
+            return
+
+        self.tool_visual_active = True
+        if not isinstance(result, dict):
+            self.presentation_card.set_text(str(result))
+            self.presentation_card.show()
+            return
+
+        if not result.get("success", True) and result.get("error"):
+            self.presentation_card.set_text(f"**Mail error**\n\n{result['error']}")
+            self.presentation_card.show()
+            return
+
+        if tool_name == "get_email":
+            self.presentation_card.set_email(result)
+        elif tool_name in {"get_recent_emails", "search_emails"}:
+            emails = result.get("emails") if isinstance(result.get("emails"), list) else result
+            if isinstance(emails, list):
+                self.presentation_card.set_email_list(emails)
+            else:
+                self.presentation_card.set_text(str(result))
+        else:
+            self.presentation_card.set_text(str(result))
+        self.presentation_card.show()
+
+    def response_finished(self, response):
+        print("Jarvis finished responding.")
+
+    def response_error(self, error):
+        self.response_label.setText(f"Error: {error}")
 
     def build_ui(self):
         central = QWidget()
@@ -300,6 +368,12 @@ class JarvisWindow(QMainWindow):
         self.top.addWidget(close)
         root.addLayout(self.top)
         root.addStretch(1)
+
+        # Visual answers live in the empty space directly above the orb.
+        self.presentation_card = ResponseCard()
+        self.presentation_card.hide()
+        root.addWidget(self.presentation_card, alignment=Qt.AlignmentFlag.AlignCenter)
+        root.addSpacing(14)
 
         self.orb = JarvisOrb()
         root.addWidget(self.orb, alignment=Qt.AlignmentFlag.AlignCenter)
@@ -371,16 +445,23 @@ class JarvisWindow(QMainWindow):
         root.addLayout(self.bottom)
         mic_button.clicked.connect(self.activate_voice)
 
+    def begin_request(self, user_input):
+        self.visual_response_mode = self.is_visual_request(user_input)
+        self.tool_visual_active = False
+        self.presentation_card.clear()
+        self.presentation_card.hide()
+        self.response_label.setText("")
+        self.response_label.hide() if self.visual_response_mode else self.response_label.show()
+        self.set_processing_state()
+        self.start_worker(user_input)
+        self.tts.stop_speaking()
+
     def send_message(self):
         user_input = self.input.text().strip()
         if not user_input:
             return
         self.input.clear()
-        self.response_label.setText("")
-        self.response_label.show()
-        self.set_processing_state()
-        self.start_worker(user_input)
-        self.tts.stop_speaking()
+        self.begin_request(user_input)
 
     def start_worker(self, message):
         self.worker_thread = QThread()
@@ -391,19 +472,39 @@ class JarvisWindow(QMainWindow):
         self.worker.failed.connect(self.handle_error)
         self.worker.finished.connect(self.worker_thread.quit)
         self.worker.token_received.connect(self.add_response_token)
+        self.worker.tool_result.connect(self.handle_tool_result)
         self.worker.failed.connect(self.worker_thread.quit)
         self.worker_thread.finished.connect(self.worker.deleteLater)
         self.worker_thread.finished.connect(self.worker_thread.deleteLater)
         self.worker_thread.start()
 
     def handle_response(self, result):
+        if self.visual_response_mode:
+            # The complete answer is already visible in the card. Visual
+            # requests do not need to be read back word-for-word.
+            if not self.tool_visual_active:
+                self.presentation_card.set_markdown(result)
+                self.presentation_card.title.setText("JARVIS  /  ANSWER")
+                self.presentation_card.show()
+            self.orb.set_state("idle")
+            self.status.set_status("●  DISPLAYING", "#29B6FF")
+            QTimer.singleShot(1200, self._return_to_idle)
+            return
+
         self.tts.finish_response()
+
+    def _return_to_idle(self):
+        if self.orb.state == "idle":
+            self.status.set_status("●  IDLE", "#527086")
 
     def handle_error(self, error):
         self.orb.set_state("idle")
         self.status.set_status("●  ERROR", "#FF5577")
         self.response_label.setText(error)
         self.response_label.show()
+        if self.visual_response_mode:
+            self.presentation_card.set_text(error)
+            self.presentation_card.show()
 
     def set_processing_state(self):
         self.orb.set_state("processing")
@@ -490,11 +591,8 @@ class JarvisWindow(QMainWindow):
         if self.jarvis_mode == "full":
             self.interpreted_label.setText(f'"{text}"')
             self.interpreted_label.show()
-            self.response_label.clear()
-            self.response_label.show()
         else:
             self.interpreted_label.hide()
-            self.response_label.hide()
             self.status.hide()
             self.input.hide()
         self.set_processing_state()
@@ -503,7 +601,7 @@ class JarvisWindow(QMainWindow):
             self.interpreted_label.hide()
             self.response_label.hide()
             self.input.hide()
-        self.start_worker(text)
+        self.begin_request(text)
 
     def handle_voice_error(self, error):
         self.orb.set_state("idle")
@@ -572,12 +670,12 @@ class JarvisWindow(QMainWindow):
         self.status.show()
         self.interpreted_label.hide()
         self.response_label.hide()
+        self.presentation_card.hide()
         self.input.show()
 
         self.setMinimumSize(900, 700)
         self.setMaximumSize(16777215, 16777215)
 
-        # Restore the full interface across the available desktop area.
         self.showMaximized()
         self.raise_()
         self.activateWindow()
@@ -589,6 +687,7 @@ class JarvisWindow(QMainWindow):
         self.status.hide()
         self.interpreted_label.hide()
         self.response_label.hide()
+        self.presentation_card.hide()
         self.input.hide()
 
         self.orb_container = QWidget()
