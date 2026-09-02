@@ -4,7 +4,7 @@ import math
 
 from PyQt6.QtCore import Qt, QTimer, QPointF
 from PyQt6.QtGui import QColor, QPainter, QPen, QRadialGradient, QFont
-from PyQt6.QtWidgets import QPushButton
+from PyQt6.QtWidgets import QPushButton, QApplication
 
 from frontend.window import JarvisWindow, JarvisOrb
 from frontend.email_viewer import EmailViewer
@@ -186,6 +186,98 @@ def _add_roast_toggle(self):
     self.bottom.insertWidget(0, self.roast_button)
 
 
+def _window_control(symbol, tooltip, base, hover):
+    """Create a small Mac-style traffic-light control using Jarvis colors."""
+    button = QPushButton(symbol)
+    button.setFixedSize(18, 18)
+    button.setToolTip(tooltip)
+    button.setStyleSheet(
+        f"""
+        QPushButton {{
+            color: #02070D;
+            background: {base};
+            border: 1px solid rgba(220, 238, 255, 35);
+            border-radius: 9px;
+            font-family: 'Segoe UI';
+            font-size: 10px;
+            font-weight: 700;
+            padding: 0;
+        }}
+        QPushButton:hover {{
+            color: #FFFFFF;
+            background: {hover};
+            border-color: rgba(255, 255, 255, 90);
+        }}
+        QPushButton:pressed {{
+            background: {hover};
+        }}
+        """
+    )
+    return button
+
+
+def _install_window_controls(self):
+    """Replace the old text controls with three themed Mac-style controls."""
+    if getattr(self, "window_controls", None) is not None:
+        return
+
+    # Remove the old minimise/close buttons created by window.py.
+    for button in list(self.findChildren(QPushButton)):
+        if button.text() in ("—", "×"):
+            self.top.removeWidget(button)
+            button.deleteLater()
+
+    close_button = _window_control("×", "Close Jarvis", "#0877B5", "#29B6FF")
+    minimize_button = _window_control("−", "Minimize Jarvis", "#168FD1", "#5CCBFF")
+    maximize_button = _window_control("+", "Expand / restore Jarvis", "#00B87A", "#4DFFC0")
+
+    close_button.clicked.connect(self.close)
+    minimize_button.clicked.connect(self.showMinimized)
+    maximize_button.clicked.connect(lambda: _toggle_window_size(self))
+
+    self.window_controls = (close_button, minimize_button, maximize_button)
+    self.window_maximize_button = maximize_button
+
+    self.top.addSpacing(8)
+    self.top.addWidget(close_button)
+    self.top.addSpacing(5)
+    self.top.addWidget(minimize_button)
+    self.top.addSpacing(5)
+    self.top.addWidget(maximize_button)
+
+
+def _sync_hud(self):
+    hud = getattr(self, "jarvis_hud", None)
+    if hud is not None:
+        hud.sync_geometry()
+        hud.raise_()
+        hud.lower()
+
+
+def _toggle_window_size(self):
+    """Toggle between the fullscreen command center and a centered window."""
+    if self.isFullScreen() or self.isMaximized():
+        self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+        self.showNormal()
+        self.setMinimumSize(900, 700)
+        self.setMaximumSize(16777215, 16777215)
+        self.resize(1400, 850)
+
+        screen = self.screen() or QApplication.primaryScreen()
+        geometry = screen.availableGeometry()
+        x = geometry.center().x() - self.width() // 2
+        y = geometry.center().y() - self.height() // 2
+        self.move(max(geometry.left(), x), max(geometry.top(), y))
+        self.show()
+        self.raise_()
+        self.activateWindow()
+        _sync_hud(self)
+        print("[JARVIS] Window restored to centered mode.")
+    else:
+        self.show_fullscreen_mode()
+        print("[JARVIS] Window expanded to fullscreen mode.")
+
+
 def _install_hud(self):
     """Install the non-interactive sci-fi command-center overlay."""
     if getattr(self, "jarvis_hud", None) is not None:
@@ -202,7 +294,10 @@ def _patched_window_init(self):
     self.response_cancelled = False
     self.email_viewer = None
     self.open_email_viewer = lambda: _open_email_viewer(self)
+    self.window_controls = None
+    self.window_maximize_button = None
     _add_roast_toggle(self)
+    _install_window_controls(self)
     _install_hud(self)
     QTimer.singleShot(0, lambda: _connect_mail_button(self))
 
@@ -335,7 +430,7 @@ def _show_fullscreen_mode(self):
 
     self.setMinimumSize(0, 0)
     self.setMaximumSize(16777215, 16777215)
-    self.setWindowFlags(Qt.WindowType.Window)
+    self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
     self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
     self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, False)
     self.showFullScreen()
