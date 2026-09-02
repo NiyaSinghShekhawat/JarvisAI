@@ -1,4 +1,4 @@
-"""Runtime additions for Jarvis interruption and orb presentation."""
+"""Runtime additions for Jarvis interruption, orb presentation, and mail UI."""
 
 import math
 
@@ -6,6 +6,7 @@ from PyQt6.QtCore import Qt, QTimer, QPointF
 from PyQt6.QtGui import QColor, QPainter, QPen, QRadialGradient, QFont
 
 from frontend.window import JarvisWindow, JarvisOrb
+from frontend.email_viewer import EmailViewer
 from voice.wake_word import StopWordWorker
 
 
@@ -133,10 +134,35 @@ _original_show_orb_mode = JarvisWindow.show_orb_mode
 _original_handle_wake = JarvisWindow.handle_wake
 
 
+def _open_email_viewer(self):
+    """Open the native Gmail reader without leaving the Jarvis UI."""
+    if getattr(self, "email_viewer", None) is None:
+        self.email_viewer = EmailViewer(self)
+
+    self.email_viewer.show()
+    self.email_viewer.raise_()
+    self.email_viewer.activateWindow()
+
+
+def _connect_mail_button(self):
+    """Find the existing Gmail icon and connect it to the mail reader."""
+    for button in self.findChildren(__import__("PyQt6.QtWidgets", fromlist=["QPushButton"]).QPushButton):
+        if button.toolTip() == "Gmail":
+            try:
+                button.clicked.disconnect()
+            except TypeError:
+                pass
+            button.clicked.connect(self.open_email_viewer)
+            return
+
+
 def _patched_window_init(self):
     _original_window_init(self)
     self.stop_worker = None
     self.response_cancelled = False
+    self.email_viewer = None
+    self.open_email_viewer = lambda: _open_email_viewer(self)
+    QTimer.singleShot(0, lambda: _connect_mail_button(self))
 
 
 def _start_stop_listener(self):
