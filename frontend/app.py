@@ -1,12 +1,13 @@
 import sys
 
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, QThread
 from PyQt6.QtWidgets import QApplication, QPushButton
 
 from frontend.window import JarvisWindow
 from frontend.styles import APP_STYLE
 from voice.text_to_speech import TextToSpeech
 from voice.speech_sanitizer import speech_safe_text
+from voice.voice_worker import VoiceWorker
 
 # Runtime UI/voice extensions.
 import frontend.interrupt  # noqa: F401,E402
@@ -140,16 +141,40 @@ def _toggle_voice_input(self):
 
 
 def _start_voice_capture(self):
+    """Start exactly one concrete VoiceWorker; lifecycle.py guards when it is safe."""
     if not getattr(self, "voice_mode_enabled", False):
         return
 
-    if self.voice_thread is not None and self.voice_thread.isRunning():
-        return
+    if self.voice_thread is not None:
+        if self.voice_thread.isRunning():
+            return
+        self.voice_thread = None
+        self.voice_worker = None
 
-    # VoiceWorker still records one utterance at a time. The patched
-    # voice_finished() starts the next utterance only after the previous
-    # QThread has fully stopped and the other microphone users are idle.
-    _original_activate_voice(self)
+    self.orb.set_state("listening")
+    if self.jarvis_mode == "full":
+        self.status.set_status("●  LISTENING", "#00E89A")
+        self.interpreted_label.setText("Listening...")
+        self.interpreted_label.show()
+        self.response_label.hide()
+    else:
+        self.status.hide()
+        self.interpreted_label.hide()
+        self.response_label.hide()
+        self.input.hide()
+
+    self.voice_thread = QThread()
+    self.voice_worker = VoiceWorker()
+    self.voice_worker.moveToThread(self.voice_thread)
+    self.voice_thread.started.connect(self.voice_worker.run)
+    self.voice_worker.level.connect(self.update_microphone_level)
+    self.voice_worker.transcript.connect(self.handle_voice_transcript)
+    self.voice_worker.error.connect(self.handle_voice_error)
+    self.voice_worker.finished.connect(self.voice_thread.quit)
+    self.voice_worker.finished.connect(self.voice_worker.deleteLater)
+    self.voice_thread.finished.connect(self.voice_thread.deleteLater)
+    self.voice_thread.finished.connect(self.voice_finished)
+    self.voice_thread.start()
 
 
 def _persistent_activate_voice(self):
