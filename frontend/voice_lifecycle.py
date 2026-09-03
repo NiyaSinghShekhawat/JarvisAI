@@ -16,9 +16,10 @@ def install_voice_lifecycle():
         return
     _INSTALLED = True
 
-    app_module = __import__("frontend.app", fromlist=["_original_voice_finished"])
+    app_module = __import__("frontend.app", fromlist=["_start_voice_capture"])
 
     original_start_worker = interrupt_runtime._original_start_worker
+    original_start_voice_capture = app_module._start_voice_capture
     original_voice_finished = app_module._original_voice_finished
     original_handle_voice_error = app_module._original_handle_voice_error
     original_tts_started = JarvisWindow.tts_started
@@ -64,7 +65,7 @@ def install_voice_lifecycle():
         original_start_worker(self, message)
 
     def safe_start_voice_capture(self):
-        """Never create a new VoiceWorker while another audio worker is alive."""
+        """Start the real STT worker without re-entering the monkeypatch chain."""
         if not getattr(self, "voice_mode_enabled", False):
             return
 
@@ -83,9 +84,11 @@ def install_voice_lifecycle():
         if getattr(self.tts, "currently_speaking", False):
             return
 
-        # Use the original window implementation so this lifecycle layer does
-        # not recursively call the persistent-voice monkeypatch.
-        app_module._original_activate_voice(self)
+        # IMPORTANT: call the concrete worker-start implementation captured
+        # before this lifecycle wrapper replaced _start_voice_capture. Never
+        # route through activate_voice here; persistent activate_voice itself
+        # delegates to _start_voice_capture and would recurse forever.
+        original_start_voice_capture(self)
 
     def safe_voice_finished(self):
         """Do not reopen the microphone while Jarvis is processing or speaking."""
@@ -109,8 +112,6 @@ def install_voice_lifecycle():
         """Run the stop-word listener only while no STT capture owns the mic."""
         original_tts_started(self)
         if getattr(self, "voice_mode_enabled", False):
-            # Continuous STT is paused during speech, so the stop-word listener
-            # is the sole microphone consumer here.
             self._start_stop_listener()
 
     def safe_tts_response_finished(self):
