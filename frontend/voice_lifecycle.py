@@ -25,6 +25,7 @@ def install_voice_lifecycle():
     original_tts_started = JarvisWindow.tts_started
     original_tts_response_finished = JarvisWindow.tts_response_finished
     original_handle_response = JarvisWindow.handle_response
+    original_is_visual_request = JarvisWindow.is_visual_request
 
     def thread_running(thread):
         """Safely query a Qt thread that may already have been deleted."""
@@ -33,9 +34,29 @@ def install_voice_lifecycle():
         try:
             return thread.isRunning()
         except RuntimeError:
-            # PyQt raises this when the C++ QThread has already been deleted
-            # while Python still holds the wrapper object.
             return False
+
+    def is_visual_request(text):
+        """Keep tool-backed voice requests, especially weather, voice-first."""
+        normalized = str(text or "").lower().strip()
+
+        # Weather is intentionally spoken by Jarvis. The generic visual
+        # classifier considers questions such as "what's the weather..."
+        # visual because they start with "what's"; that would suppress TTS.
+        weather_phrases = (
+            "weather",
+            "temperature",
+            "forecast",
+            "is it raining",
+            "will it rain",
+            "humidity",
+            "wind speed",
+            "wind direction",
+        )
+        if any(phrase in normalized for phrase in weather_phrases):
+            return False
+
+        return original_is_visual_request(text)
 
     def schedule_voice_capture(self, delay=80):
         """Wait until every other microphone/response worker is finished."""
@@ -51,8 +72,6 @@ def install_voice_lifecycle():
                 QTimer.singleShot(100, attempt)
                 return
             elif voice_thread is not None:
-                # The Qt object is either finished or already destroyed.
-                # Do not keep a stale wrapper around between voice turns.
                 self.voice_thread = None
                 self.voice_worker = None
 
@@ -103,8 +122,6 @@ def install_voice_lifecycle():
         if getattr(self.tts, "currently_speaking", False):
             return
 
-        # Call the concrete worker-start implementation captured before this
-        # lifecycle wrapper replaced _start_voice_capture.
         original_start_voice_capture(self)
 
     def safe_voice_finished(self):
@@ -140,6 +157,41 @@ def install_voice_lifecycle():
         if getattr(self, "voice_mode_enabled", False) and getattr(self, "visual_response_mode", False):
             self._schedule_voice_capture(120)
 
+    def safe_close_event(self, event):
+        """Stop persistent voice workers before Qt destroys the window."""
+        self.voice_mode_enabled = False
+
+        try:
+            self._stop_stop_listener()
+        except Exception:
+            pass
+
+        try:
+            self.stop_wake_listener()
+        except Exception:
+            pass
+
+        try:
+            self._stop_voice_capture()
+        except Exception:
+            pass
+
+        worker_thread = getattr(self, "worker_thread", None)
+        if thread_running(worker_thread):
+            try:
+                worker_thread.quit()
+                worker_thread.wait(1500)
+            except Exception:
+                pass
+
+        try:
+            self.worker_thread = None
+            self.worker = None
+            event.accept()
+        except Exception:
+            event.accept()
+
+    JarvisWindow.is_visual_request = staticmethod(is_visual_request)
     JarvisWindow.start_worker = safe_start_worker
     JarvisWindow._start_voice_capture = safe_start_voice_capture
     JarvisWindow.voice_finished = safe_voice_finished
@@ -147,6 +199,7 @@ def install_voice_lifecycle():
     JarvisWindow.tts_started = safe_tts_started
     JarvisWindow.tts_response_finished = safe_tts_response_finished
     JarvisWindow.handle_response = safe_handle_response
+    JarvisWindow.closeEvent = safe_close_event
     JarvisWindow._schedule_voice_capture = schedule_voice_capture
 
 
