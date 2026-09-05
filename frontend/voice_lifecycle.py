@@ -26,6 +26,17 @@ def install_voice_lifecycle():
     original_tts_response_finished = JarvisWindow.tts_response_finished
     original_handle_response = JarvisWindow.handle_response
 
+    def thread_running(thread):
+        """Safely query a Qt thread that may already have been deleted."""
+        if thread is None:
+            return False
+        try:
+            return thread.isRunning()
+        except RuntimeError:
+            # PyQt raises this when the C++ QThread has already been deleted
+            # while Python still holds the wrapper object.
+            return False
+
     def schedule_voice_capture(self, delay=80):
         """Wait until every other microphone/response worker is finished."""
         if not getattr(self, "voice_mode_enabled", False):
@@ -36,19 +47,27 @@ def install_voice_lifecycle():
                 return
 
             voice_thread = getattr(self, "voice_thread", None)
-            if voice_thread is not None and voice_thread.isRunning():
+            if thread_running(voice_thread):
                 QTimer.singleShot(100, attempt)
                 return
+            elif voice_thread is not None:
+                # The Qt object is either finished or already destroyed.
+                # Do not keep a stale wrapper around between voice turns.
+                self.voice_thread = None
+                self.voice_worker = None
 
             stop_worker = getattr(self, "stop_worker", None)
-            if stop_worker is not None and stop_worker.isRunning():
+            if thread_running(stop_worker):
                 QTimer.singleShot(100, attempt)
                 return
 
             response_thread = getattr(self, "worker_thread", None)
-            if response_thread is not None and response_thread.isRunning():
+            if thread_running(response_thread):
                 QTimer.singleShot(100, attempt)
                 return
+            elif response_thread is not None:
+                self.worker_thread = None
+                self.worker = None
 
             if getattr(self.tts, "currently_speaking", False):
                 QTimer.singleShot(100, attempt)
@@ -70,35 +89,30 @@ def install_voice_lifecycle():
             return
 
         voice_thread = getattr(self, "voice_thread", None)
+        if thread_running(voice_thread):
+            return
         if voice_thread is not None:
-            if voice_thread.isRunning():
-                return
             self.voice_thread = None
             self.voice_worker = None
 
         stop_worker = getattr(self, "stop_worker", None)
-        if stop_worker is not None and stop_worker.isRunning():
+        if thread_running(stop_worker):
             QTimer.singleShot(100, self._start_voice_capture)
             return
 
         if getattr(self.tts, "currently_speaking", False):
             return
 
-        # IMPORTANT: call the concrete worker-start implementation captured
-        # before this lifecycle wrapper replaced _start_voice_capture. Never
-        # route through activate_voice here; persistent activate_voice itself
-        # delegates to _start_voice_capture and would recurse forever.
+        # Call the concrete worker-start implementation captured before this
+        # lifecycle wrapper replaced _start_voice_capture.
         original_start_voice_capture(self)
 
     def safe_voice_finished(self):
-        """Do not reopen the microphone while Jarvis is processing or speaking."""
+        """Clear stale Qt references and continue persistent voice mode."""
         original_voice_finished(self)
         if not getattr(self, "voice_mode_enabled", False):
             return
 
-        # Normal answers are followed by TTS. Waiting for response_finished is
-        # important: otherwise STT can reopen the shared microphone just before
-        # the stop-word listener starts, creating two competing InputStreams.
         if getattr(self, "visual_response_mode", False):
             self._schedule_voice_capture(120)
 
