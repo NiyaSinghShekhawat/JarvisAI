@@ -1,10 +1,10 @@
-from PyQt6.QtCore import QThread, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
 from voice.speech_to_text import SpeechToText
 
 
-class VoiceWorker(QThread):
-    """Background worker for Jarvis voice input."""
+class VoiceWorker(QObject):
+    """Microphone capture worker owned by a dedicated QThread."""
 
     transcript = pyqtSignal(str)
     level = pyqtSignal(float)
@@ -14,8 +14,6 @@ class VoiceWorker(QThread):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        # SpeechToText uses the same explicit microphone configuration as the
-        # passive wake listener, so both stages hear the same physical mic.
         self.speech_to_text = SpeechToText()
         self._stop_requested = False
 
@@ -23,15 +21,18 @@ class VoiceWorker(QThread):
         if not self._stop_requested:
             self.level.emit(value)
 
+    @pyqtSlot()
     def run(self):
         try:
             self._stop_requested = False
 
             audio = self.speech_to_text.record_until_silence(
-                level_callback=self.on_audio_level
+                level_callback=self.on_audio_level,
+                stop_callback=lambda: self._stop_requested,
             )
 
             if self._stop_requested:
+                self.finished.emit()
                 return
 
             if not audio:
@@ -41,6 +42,7 @@ class VoiceWorker(QThread):
             text = self.speech_to_text.transcribe(audio)
 
             if self._stop_requested:
+                self.finished.emit()
                 return
 
             if text:
@@ -51,9 +53,11 @@ class VoiceWorker(QThread):
         except Exception as e:
             message = str(e)
             print(f"[VoiceWorker ERROR] {message}")
-            self.error.emit(message)
-            self.failed.emit(message)
+            if not self._stop_requested:
+                self.error.emit(message)
+                self.failed.emit(message)
             self.finished.emit()
 
     def stop(self):
+        """Request capture cancellation; the STT loop exits promptly."""
         self._stop_requested = True
