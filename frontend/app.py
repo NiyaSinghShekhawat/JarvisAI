@@ -31,14 +31,9 @@ TextToSpeech.finish_response = _safe_finish_response
 # ============================================================
 # PERSISTENT VOICE INPUT
 # ============================================================
-# Voice mode is now a conversation mode rather than a one-shot recording.
+# Voice mode is a conversation mode rather than a one-shot recording.
 # Once enabled, Jarvis keeps opening the microphone for the next utterance
-# automatically. That means:
-#   1. User speaks -> Jarvis processes it.
-#   2. Jarvis speaks -> microphone remains available.
-#   3. User can interrupt Jarvis at any point with another command.
-#   4. If the user says nothing, Jarvis simply waits for the next command.
-#   5. The mode only stops when the user explicitly toggles voice OFF.
+# automatically. It only stops when the user explicitly toggles voice OFF.
 _original_window_init = JarvisWindow.__init__
 _original_activate_voice = JarvisWindow.activate_voice
 _original_voice_finished = JarvisWindow.voice_finished
@@ -107,12 +102,15 @@ def _stop_voice_capture(self):
     if worker is not None:
         worker.stop()
 
-    if thread is not None and thread.isRunning():
-        thread.quit()
-        thread.wait(1000)
+    if thread is not None:
+        # VoiceWorker is a QObject now, so QThread owns the lifetime cleanly.
+        if thread.isRunning():
+            thread.quit()
+            thread.wait(2000)
 
-    self.voice_thread = None
-    self.voice_worker = None
+        if not thread.isRunning():
+            self.voice_thread = None
+            self.voice_worker = None
 
 
 def _turn_voice_off(self):
@@ -141,15 +139,23 @@ def _toggle_voice_input(self):
 
 
 def _start_voice_capture(self):
-    """Start exactly one concrete VoiceWorker; lifecycle.py guards when it is safe."""
+    """Start exactly one QObject VoiceWorker in a dedicated QThread."""
     if not getattr(self, "voice_mode_enabled", False):
         return
 
-    if self.voice_thread is not None:
-        if self.voice_thread.isRunning():
-            return
-        self.voice_thread = None
-        self.voice_worker = None
+    thread = getattr(self, "voice_thread", None)
+    if thread is not None:
+        try:
+            if thread.isRunning():
+                return
+        except RuntimeError:
+            self.voice_thread = None
+            self.voice_worker = None
+            thread = None
+
+        if thread is not None:
+            self.voice_thread = None
+            self.voice_worker = None
 
     self.orb.set_state("listening")
     if self.jarvis_mode == "full":
@@ -163,18 +169,22 @@ def _start_voice_capture(self):
         self.response_label.hide()
         self.input.hide()
 
-    self.voice_thread = QThread()
-    self.voice_worker = VoiceWorker()
-    self.voice_worker.moveToThread(self.voice_thread)
-    self.voice_thread.started.connect(self.voice_worker.run)
-    self.voice_worker.level.connect(self.update_microphone_level)
-    self.voice_worker.transcript.connect(self.handle_voice_transcript)
-    self.voice_worker.error.connect(self.handle_voice_error)
-    self.voice_worker.finished.connect(self.voice_thread.quit)
-    self.voice_worker.finished.connect(self.voice_worker.deleteLater)
-    self.voice_thread.finished.connect(self.voice_thread.deleteLater)
-    self.voice_thread.finished.connect(self.voice_finished)
-    self.voice_thread.start()
+    thread = QThread(self)
+    worker = VoiceWorker()
+    worker.moveToThread(thread)
+
+    self.voice_thread = thread
+    self.voice_worker = worker
+
+    thread.started.connect(worker.run)
+    worker.level.connect(self.update_microphone_level)
+    worker.transcript.connect(self.handle_voice_transcript)
+    worker.error.connect(self.handle_voice_error)
+    worker.finished.connect(thread.quit)
+    worker.finished.connect(worker.deleteLater)
+    thread.finished.connect(self.voice_finished)
+    thread.finished.connect(thread.deleteLater)
+    thread.start()
 
 
 def _persistent_activate_voice(self):
@@ -190,16 +200,11 @@ def _persistent_voice_finished(self):
     if not getattr(self, "voice_mode_enabled", False):
         return
 
-    # Lifecycle coordination is installed after this module and replaces
-    # this method with a guarded scheduler. Keep this fallback for imports
-    # that do not load the lifecycle extension.
+    # voice_lifecycle.py replaces this with a guarded scheduler when loaded.
     QTimer.singleShot(80, self._start_voice_capture)
 
 
 def _persistent_handle_voice_transcript(self, text):
-    # The existing handler stops TTS before submitting the new command.
-    # Because voice_mode_enabled stays true, the lifecycle manager starts
-    # another capture when all other workers have released the microphone.
     _original_handle_voice_transcript(self, text)
 
 
