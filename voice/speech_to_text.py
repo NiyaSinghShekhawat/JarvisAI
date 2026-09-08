@@ -30,6 +30,7 @@ class SpeechToText:
     def record_until_silence(
         self,
         level_callback: Optional[Callable[[float], None]] = None,
+        stop_callback: Optional[Callable[[], bool]] = None,
     ):
         frames: list[np.ndarray] = []
         silence_start: Optional[float] = None
@@ -70,6 +71,9 @@ class SpeechToText:
             callback=callback,
         ):
             while True:
+                if stop_callback and stop_callback():
+                    break
+
                 elapsed = time.time() - start_time
 
                 if elapsed >= self.max_duration:
@@ -83,6 +87,9 @@ class SpeechToText:
                     break
 
                 time.sleep(0.05)
+
+        if stop_callback and stop_callback():
+            return None
 
         if not frames or not has_spoken:
             return None
