@@ -1,4 +1,5 @@
 import math
+from datetime import datetime
 from PyQt6.QtCore import Qt, QTimer, QRectF, QPointF
 from PyQt6.QtGui import QColor, QPainter, QPen, QFont, QLinearGradient
 from PyQt6.QtWidgets import QWidget
@@ -39,6 +40,36 @@ class JarvisHUD(QWidget):
             "speaking": QColor("#35BFFF"),
             "processing": QColor("#7770FF"),
         }.get(self.state(), QColor("#258BFF"))
+
+    def time_edge_colors(self):
+        """Return two smoothly changing edge colors based on local time."""
+        hour = datetime.now().hour + datetime.now().minute / 60.0
+
+        # Night -> dawn -> day -> sunset -> night.
+        stops = [
+            (0.0, (72, 72, 255)),    # midnight
+            (5.5, (105, 82, 255)),   # pre-dawn
+            (7.0, (0, 220, 190)),    # morning
+            (10.0, (0, 185, 255)),   # daytime
+            (14.0, (55, 205, 255)),  # afternoon
+            (17.0, (255, 180, 75)),  # golden hour
+            (19.0, (255, 95, 145)),  # sunset
+            (21.0, (120, 75, 255)),  # evening
+            (24.0, (72, 72, 255)),   # midnight
+        ]
+
+        for i in range(len(stops) - 1):
+            t1, c1 = stops[i]
+            t2, c2 = stops[i + 1]
+            if t1 <= hour <= t2:
+                ratio = (hour - t1) / (t2 - t1)
+                c = tuple(int(a + (b - a) * ratio) for a, b in zip(c1, c2))
+                # A second, slightly offset hue keeps the edge looking alive.
+                next_ratio = min(1.0, ratio + 0.18)
+                c2_shift = tuple(int(a + (b - a) * next_ratio) for a, b in zip(c1, c2))
+                return QColor(*c), QColor(*c2_shift)
+
+        return QColor("#4848FF"), QColor("#7A52FF")
 
     def panel(self, p, r, title, lines, a):
         x, y, w, h = r.x(), r.y(), r.width(), r.height()
@@ -222,10 +253,11 @@ class JarvisHUD(QWidget):
         p.setPen(QPen(QColor(a.red(), a.green(), a.blue(), 20), 1))
         p.drawRect(QRectF(3, 3, w - 6, h - 6))
 
+        edge_primary, edge_secondary = self.time_edge_colors()
         if self.state() == "listening":
             self.edge(p, w, h, (self.phase * 0.10) % 1, 0.22, QColor("#00E89A"))
         else:
-            self.edge(p, w, h, (self.phase * 0.055) % 1, 0.17, a)
-            self.edge(p, w, h, (self.phase * 0.055 + 0.48) % 1, 0.11, QColor("#8B5CFF"))
+            self.edge(p, w, h, (self.phase * 0.055) % 1, 0.17, edge_primary)
+            self.edge(p, w, h, (self.phase * 0.055 + 0.48) % 1, 0.11, edge_secondary)
 
         p.end()
