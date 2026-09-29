@@ -1,8 +1,13 @@
 import os
 from typing import Any
 
+from dotenv import load_dotenv
 from hindsight_client import Hindsight
 
+
+# This module is imported before llm.py in the router, so load .env here
+# before reading Hindsight configuration.
+load_dotenv()
 
 HINDSIGHT_API_URL = os.getenv("HINDSIGHT_API_URL", "http://localhost:8888")
 HINDSIGHT_API_KEY = os.getenv("HINDSIGHT_API_KEY")
