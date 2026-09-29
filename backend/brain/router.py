@@ -1,6 +1,7 @@
 import json
 from typing import Generator
 
+from backend.brain.hindsight_memory import memory
 from backend.brain.llm import SYSTEM_PROMPT, get_llm, get_provider_info
 from backend.tools.tools_registry import TOOL_DEFINITIONS, execute_tool
 
@@ -40,10 +41,27 @@ def is_roast_mode():
     return _roast_mode
 
 
+def _format_memories(memories: list[str]) -> str:
+    if not memories:
+        return ""
+
+    lines = "\n".join(f"- {item}" for item in memories)
+    return (
+        "\n\nLONG-TERM MEMORY CONTEXT\n"
+        "The following memories were recalled because they may be relevant. "
+        "Use them only when they help answer the current request. "
+        "Do not mention that they came from a memory system unless the user asks.\n"
+        f"{lines}"
+    )
+
+
 def _build_messages(message: str, conversation=None):
     system_prompt = SYSTEM_PROMPT
     if _roast_mode:
         system_prompt += "\n\n" + ROAST_PROMPT
+
+    recalled_memories = memory.recall(message)
+    system_prompt += _format_memories(recalled_memories)
 
     messages = [{"role": "system", "content": system_prompt}]
     if conversation:
@@ -68,6 +86,7 @@ def _clean_tool_arguments(arguments):
 def get_router_status():
     status = get_provider_info()
     status["roast_mode"] = _roast_mode
+    status["memory"] = "hindsight"
     return status
 
 
@@ -92,6 +111,8 @@ def process_request(user_input: str, conversation=None):
             if conversation is not None:
                 conversation.append({"role": "user", "content": user_input})
                 conversation.append({"role": "assistant", "content": content})
+
+            memory.retain_turn(user_input, content)
             return {"type": "text", "content": content}
 
         messages.append({
@@ -173,6 +194,8 @@ def process_request_stream(user_input: str, conversation=None) -> Generator[dict
             if conversation is not None:
                 conversation.append({"role": "user", "content": user_input})
                 conversation.append({"role": "assistant", "content": full_response})
+
+            memory.retain_turn(user_input, full_response)
             yield {"type": "done"}
             return
 
